@@ -1,0 +1,54 @@
+# Splice C++ formatting — derived from Google, 4-space indent, 100 cols.
+# Matches .cpp-style.yaml naming rules (3+1, m_snake_case).
+BasedOnStyle: Google
+Language: Cpp
+Standard: c++20
+
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+
+AccessModifierOffset: -4
+PackConstructorInitializers: Never
+ConstructorInitializerIndentWidth: 4
+
+PointerAlignment: Left            # const char* p  (not  const char *p)
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+NamespaceIndentation: None
+FixNamespaceComments: true
+CompactNamespaces: false
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignTrailingComments: true
+
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<splice/'
+    Priority: 1
+  - Regex: '^".*\.h"'
+    Priority: 2
+  - Regex: '^<.*\.h>'
+    Priority: 3
+  - Regex: '^<.*>'
+    Priority: 4
+
+SortIncludes: CaseSensitive
+SortUsingDeclarations: true
+
+SpacesBeforeTrailingComments: 2
+SpaceBeforeParens: ControlStatements

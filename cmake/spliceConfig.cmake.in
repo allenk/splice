@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+# Splice is a static library with a C++20 public API and no mandatory
+# third-party runtime dependencies (platform_log.h + nmd are vendored, the
+# OS/arch backends link system libs privately). So the consumer side just
+# needs the exported targets.
+
+include("${CMAKE_CURRENT_LIST_DIR}/spliceTargets.cmake")
+
+check_required_components(splice)

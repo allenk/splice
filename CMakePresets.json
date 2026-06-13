@@ -1,0 +1,280 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {"major": 3, "minor": 21, "patch": 0},
+
+    "configurePresets": [
+        {
+            "name": "_common",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            },
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+            "condition": {
+                "type": "notEquals",
+                "lhs": "$env{VCPKG_ROOT}",
+                "rhs": ""
+            }
+        },
+
+        {
+            "name": "_windows_x64",
+            "hidden": true,
+            "inherits": "_common",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-windows"
+            }
+        },
+
+        {
+            "name": "_linux_x64",
+            "hidden": true,
+            "inherits": "_common",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-linux"
+            }
+        },
+
+        {
+            "name": "_linux_arm64",
+            "hidden": true,
+            "inherits": "_common",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Linux"
+            },
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "arm64-linux"
+            }
+        },
+
+        {
+            "name": "windows-x64-dev",
+            "displayName": "Windows x64 Dev (Debug · VS2022 · Ninja)",
+            "description": "Default developer build. Requires VS2022 dev-shell (see CLAUDE.md §Build Environment) and VCPKG_ROOT.",
+            "inherits": "_windows_x64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SPLICE_BUILD_TESTS": "ON",
+                "SPLICE_BUILD_EXAMPLES": "ON"
+            }
+        },
+
+        {
+            "name": "windows-x64-release",
+            "displayName": "Windows x64 Release (VS2022 · Ninja)",
+            "inherits": "_windows_x64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SPLICE_BUILD_TESTS": "OFF",
+                "SPLICE_BUILD_EXAMPLES": "OFF"
+            }
+        },
+
+        {
+            "name": "windows-x64-dev-asan",
+            "displayName": "Windows x64 Dev + AddressSanitizer",
+            "inherits": "windows-x64-dev",
+            "cacheVariables": {
+                "SPLICE_ENABLE_ASAN": "ON"
+            }
+        },
+
+        {
+            "name": "windows-x64-bench",
+            "displayName": "Windows x64 Bench (Release · benchmarks ON)",
+            "description": "FR-010 microbenchmarks. Release build, no tests/examples, vcpkg pulls google-benchmark via the 'benchmarks' manifest feature.",
+            "inherits": "_windows_x64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SPLICE_BUILD_TESTS": "OFF",
+                "SPLICE_BUILD_EXAMPLES": "OFF",
+                "SPLICE_BUILD_BENCHMARKS": "ON",
+                "VCPKG_MANIFEST_FEATURES": "benchmarks"
+            }
+        },
+
+        {
+            "name": "windows-x64-dev-ubsan",
+            "displayName": "Windows x64 Dev + UBSan (Clang-cl)",
+            "inherits": "windows-x64-dev",
+            "cacheVariables": {
+                "SPLICE_ENABLE_UBSAN": "ON"
+            }
+        },
+
+        {
+            "name": "linux-x64-dev",
+            "displayName": "Linux x64 Dev (Debug · Ninja)",
+            "inherits": "_linux_x64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SPLICE_BUILD_TESTS": "ON",
+                "SPLICE_BUILD_EXAMPLES": "ON"
+            }
+        },
+
+        {
+            "name": "linux-x64-release",
+            "displayName": "Linux x64 Release",
+            "inherits": "_linux_x64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SPLICE_BUILD_TESTS": "OFF",
+                "SPLICE_BUILD_EXAMPLES": "OFF"
+            }
+        },
+
+        {
+            "name": "linux-x64-dev-asan",
+            "displayName": "Linux x64 Dev + ASan",
+            "inherits": "linux-x64-dev",
+            "cacheVariables": {
+                "SPLICE_ENABLE_ASAN": "ON"
+            }
+        },
+
+        {
+            "name": "linux-x64-dev-tsan",
+            "displayName": "Linux x64 Dev + TSan",
+            "inherits": "linux-x64-dev",
+            "cacheVariables": {
+                "SPLICE_ENABLE_TSAN": "ON"
+            }
+        },
+
+        {
+            "name": "linux-arm64-dev",
+            "displayName": "Linux ARM64 Dev (Phase 1 target)",
+            "inherits": "_linux_arm64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SPLICE_BUILD_TESTS": "ON",
+                "SPLICE_BUILD_EXAMPLES": "ON"
+            }
+        },
+
+        {
+            "name": "_android_arm64",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "VCPKG_TARGET_TRIPLET": "arm64-android",
+                "ANDROID_PLATFORM": "android-29",
+                "CMAKE_ANDROID_API": "29",
+                "ANDROID_ABI": "arm64-v8a",
+                "ANDROID_STL": "c++_static",
+                "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
+            },
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+            "condition": {
+                "type": "allOf",
+                "conditions": [
+                    {"type": "notEquals", "lhs": "$env{VCPKG_ROOT}", "rhs": ""},
+                    {"type": "notEquals", "lhs": "$env{ANDROID_NDK_HOME}", "rhs": ""}
+                ]
+            }
+        },
+
+        {
+            "name": "android-arm64-dev",
+            "displayName": "Android ARM64 Dev (NDK · Debug · Ninja)",
+            "description": "Cross-compile from any host. Requires VCPKG_ROOT + ANDROID_NDK_HOME. Test binaries land under out/build/android-arm64-dev/tests/ and must be deployed via adb push to /data/local/tmp/ — see CLAUDE.md §On-device testing.",
+            "inherits": "_android_arm64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SPLICE_BUILD_TESTS": "ON",
+                "SPLICE_BUILD_EXAMPLES": "ON"
+            }
+        },
+
+        {
+            "name": "android-arm64-release",
+            "displayName": "Android ARM64 Release (NDK · Ninja)",
+            "inherits": "_android_arm64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SPLICE_BUILD_TESTS": "OFF",
+                "SPLICE_BUILD_EXAMPLES": "OFF"
+            }
+        },
+
+        {
+            "name": "android-arm64-bench",
+            "displayName": "Android ARM64 Bench (NDK · Release · benchmarks ON)",
+            "description": "FR-010 microbenchmarks for on-device validation. Release build, no tests/examples. Push binaries via adb to /data/local/tmp/.",
+            "inherits": "_android_arm64",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "SPLICE_BUILD_TESTS": "OFF",
+                "SPLICE_BUILD_EXAMPLES": "OFF",
+                "SPLICE_BUILD_BENCHMARKS": "ON",
+                "VCPKG_MANIFEST_FEATURES": "benchmarks"
+            }
+        },
+
+        {
+            "name": "vs2022",
+            "displayName": "Visual Studio 2022 IDE (multi-config)",
+            "description": "For users who want to open the project inside the VS2022 IDE. Slower than Ninja.",
+            "generator": "Visual Studio 17 2022",
+            "architecture": "x64",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "VCPKG_TARGET_TRIPLET": "x64-windows"
+            },
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+            "condition": {
+                "type": "equals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            }
+        }
+    ],
+
+    "buildPresets": [
+        {"name": "windows-x64-dev",          "configurePreset": "windows-x64-dev"},
+        {"name": "windows-x64-release",      "configurePreset": "windows-x64-release"},
+        {"name": "windows-x64-dev-asan",     "configurePreset": "windows-x64-dev-asan"},
+        {"name": "windows-x64-dev-ubsan",    "configurePreset": "windows-x64-dev-ubsan"},
+        {"name": "windows-x64-bench",        "configurePreset": "windows-x64-bench"},
+        {"name": "linux-x64-dev",            "configurePreset": "linux-x64-dev"},
+        {"name": "linux-x64-release",        "configurePreset": "linux-x64-release"},
+        {"name": "linux-x64-dev-asan",       "configurePreset": "linux-x64-dev-asan"},
+        {"name": "linux-x64-dev-tsan",       "configurePreset": "linux-x64-dev-tsan"},
+        {"name": "linux-arm64-dev",          "configurePreset": "linux-arm64-dev"},
+        {"name": "android-arm64-dev",        "configurePreset": "android-arm64-dev"},
+        {"name": "android-arm64-release",    "configurePreset": "android-arm64-release"},
+        {"name": "android-arm64-bench",      "configurePreset": "android-arm64-bench"},
+        {"name": "vs2022-debug",             "configurePreset": "vs2022", "configuration": "Debug"},
+        {"name": "vs2022-release",           "configurePreset": "vs2022", "configuration": "Release"}
+    ],
+
+    "testPresets": [
+        {"name": "windows-x64-dev",          "configurePreset": "windows-x64-dev",          "output": {"outputOnFailure": true}},
+        {"name": "windows-x64-release",      "configurePreset": "windows-x64-release",      "output": {"outputOnFailure": true}},
+        {"name": "windows-x64-dev-asan",     "configurePreset": "windows-x64-dev-asan",     "output": {"outputOnFailure": true}},
+        {"name": "linux-x64-dev",            "configurePreset": "linux-x64-dev",            "output": {"outputOnFailure": true}},
+        {"name": "linux-x64-release",        "configurePreset": "linux-x64-release",        "output": {"outputOnFailure": true}},
+        {"name": "linux-x64-dev-asan",       "configurePreset": "linux-x64-dev-asan",       "output": {"outputOnFailure": true},
+         "environment": {"LSAN_OPTIONS": "suppressions=${sourceDir}/.lsan-suppressions.txt:print_suppressions=0"}},
+        {"name": "linux-x64-dev-tsan",       "configurePreset": "linux-x64-dev-tsan",       "output": {"outputOnFailure": true}},
+        {"name": "linux-arm64-dev",          "configurePreset": "linux-arm64-dev",          "output": {"outputOnFailure": true}}
+    ]
+}

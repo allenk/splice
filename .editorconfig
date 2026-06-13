@@ -1,0 +1,71 @@
+# EditorConfig — Splice C++ project
+# https://editorconfig.org
+#
+# Mirrors the rules in .clang-format and .cpp-style.yaml so editors
+# without clang-format integration still indent and trim correctly.
+# Vendored code under third_party/ is exempt — preserve upstream
+# formatting verbatim per the "do not modify in-place" convention.
+
+root = true
+
+# ─── Defaults ─────────────────────────────────────────────────────────────
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 100              # matches .clang-format ColumnLimit
+
+# ─── C / C++ ──────────────────────────────────────────────────────────────
+[*.{c,h,cc,cpp,hpp,cxx,hxx,inl,ipp,inc}]
+indent_size = 4
+
+# ─── CMake ────────────────────────────────────────────────────────────────
+[{CMakeLists.txt,*.cmake,*.cmake.in}]
+indent_size = 4
+
+# ─── Build / config (2-space, conventional) ──────────────────────────────
+[*.{json,jsonc,yml,yaml,toml}]
+indent_size = 2
+max_line_length = unset
+
+# ─── Markdown — preserve trailing spaces (line-break syntax) ─────────────
+[*.md]
+trim_trailing_whitespace = false
+max_line_length = unset
+
+# ─── Shell ────────────────────────────────────────────────────────────────
+[*.{sh,bash}]
+indent_size = 4
+
+# ─── PowerShell ───────────────────────────────────────────────────────────
+[*.ps1]
+indent_size = 4
+# pwsh 7+ accepts LF natively; default end_of_line = lf is fine.
+
+# ─── Windows command scripts (require CRLF) ──────────────────────────────
+[*.{bat,cmd}]
+indent_size = 4
+end_of_line = crlf
+
+# ─── Python helper scripts ────────────────────────────────────────────────
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# ─── Makefile (tabs are mandatory) ────────────────────────────────────────
+[{Makefile,GNUmakefile,*.mk}]
+indent_style = tab
+
+# ─── Vendored / third-party — preserve upstream formatting ───────────────
+# `*-vendor` glob lets vcpkg / submodule mirrors share this fall-through.
+[{third_party/**,*-vendor/**,vcpkg_installed/**}]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+end_of_line = unset
+max_line_length = unset
+charset = unset

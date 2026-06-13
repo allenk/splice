@@ -1,0 +1,51 @@
+# Build
+build/
+out/
+dist/
+target/
+*.egg-info/
+
+# vcpkg
+vcpkg_installed/
+CMakeUserPresets.json
+
+# IDE
+.vscode/
+.idea/
+.vs/
+*.swp
+
+# Compiled
+*.exe
+*.o
+*.pyc
+__pycache__/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Test/Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Logs
+*.log
+*.tmp
+.env
+
+# Sessions (Telegram)
+*.session
+*.session-journal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# DOE temp files
+.tmp/*
+!.tmp/.gitkeep
+

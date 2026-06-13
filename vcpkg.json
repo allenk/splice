@@ -1,0 +1,11 @@
+{
+    "name": "splice",
+    "version": "0.1.0",
+    "dependencies": ["gtest"],
+    "features": {
+        "benchmarks": {
+            "description": "FR-010 microbenchmarks (Google Benchmark)",
+            "dependencies": ["benchmark"]
+        }
+    }
+}
