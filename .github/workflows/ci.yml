@@ -1,0 +1,111 @@
+name: CI
+
+# Build + test matrix across Splice's supported platforms. Reuses the
+# CMakePresets (they key off $VCPKG_ROOT + host system), so CI runs the same
+# configurations developers use locally.
+#
+# Coverage: Windows x64, Linux x64 (+ASan), Linux ARM64 (native), Android
+# ARM64 (cross-compile, build-only — live inline-patch needs a real device,
+# which stays a manual step on hardware).
+#
+# Not in CI by design: on-device Android run, and performance gates
+# (shared runners are too noisy for ns-level benchmarks — benches run on a
+# quiet local machine; see docs/fr-010-performance-summary.md).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-x64:
+    name: Linux x64 (gcc) + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset=linux-x64-dev
+      - name: Build
+        run: cmake --build --preset=linux-x64-dev
+      - name: Test
+        run: ctest --preset=linux-x64-dev --output-on-failure
+
+  linux-x64-asan:
+    name: Linux x64 + ASan/UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset=linux-x64-dev-asan
+      - name: Build
+        run: cmake --build --preset=linux-x64-dev-asan
+      - name: Test
+        run: ctest --preset=linux-x64-dev-asan --output-on-failure
+
+  linux-arm64:
+    name: Linux ARM64 (native) + tests
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Set VCPKG_ROOT
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset=linux-arm64-dev
+      - name: Build
+        run: cmake --build --preset=linux-arm64-dev
+      - name: Test
+        run: ctest --preset=linux-arm64-dev --output-on-failure
+
+  windows-x64:
+    name: Windows x64 (MSVC) + tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install Ninja
+        run: choco install ninja -y
+      - name: Set VCPKG_ROOT
+        shell: pwsh
+        run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+      - name: Configure
+        run: cmake --preset=windows-x64-dev
+      - name: Build
+        run: cmake --build --preset=windows-x64-dev
+      - name: Test
+        run: ctest --preset=windows-x64-dev --output-on-failure
+
+  android-arm64:
+    name: Android ARM64 (NDK cross-compile, build-only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Set toolchain env
+        run: |
+          echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake --preset=android-arm64-dev
+      - name: Build
+        run: cmake --build --preset=android-arm64-dev
+      # No test run: live inline-patch verification needs a physical ARM64
+      # device (manual step). CI proves the ARM64 build stays green.

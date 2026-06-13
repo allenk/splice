@@ -1,0 +1,31 @@
+# LeakSanitizer suppressions for Splice
+# ──────────────────────────────────────────────────────────────────────────
+# Splice deliberately holds a few allocations for the entire program lifetime.
+# These are NOT bugs — they are the documented design of an in-process hooking
+# library, where a hook (and its trampoline) must stay live as long as any
+# thread might still be executing through it. LeakSanitizer cannot know that,
+# so we suppress the specific, intentional sites here. Everything else stays
+# under full leak detection.
+#
+# Usage (already wired into CI and the *-asan presets):
+#   LSAN_OPTIONS=suppressions=<repo>/.lsan-suppressions.txt
+#
+# Suppression syntax: `leak:<substring matched against a frame in the stack>`.
+
+# rcu_writeonce policy (default): every onInvoke/before/after publishes a fresh
+# heap HookFn for lock-free reader access; the last published generation is
+# never reclaimed. See include/splice/context.h (HookStorage<rcu_writeonce>)
+# and include/splice/policy.h.
+#
+# Matched on the stable splice-internal funnel functions every hook
+# publication passes through — commit_with_gates (core.h) -> set_invoke ->
+# HookStorage::store (context.h). Multiple matchers because the symbolizer
+# sometimes abbreviates the qualified store() frame to a bare `store`.
+leak:commit_with_gates
+leak:set_invoke
+leak:HookStorage
+leak:splice::HookStorage
+
+# Diagnostic sugar (SPLICE_COUNT / SPLICE_TIME / SPLICE_TRACE) installs
+# program-lifetime observers via the same publish path.
+leak:splice::diagnostics
