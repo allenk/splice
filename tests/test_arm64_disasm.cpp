@@ -245,6 +245,123 @@ TEST(Arm64Disasm, looks_hooked_null) {
     EXPECT_FALSE(looks_hooked(nullptr));
 }
 
+// ─── fix_pc_relative_instruction: the trampoline's distance is load-bearing ─
+//
+// ARM64 needs no relay -- its patch is `ldr x17, #8 / br x17 / .quad target`,
+// which reaches anywhere, and its atomicity comes from writing the literal
+// before the single 32-bit instruction. But relocating the *prologue* into the
+// trampoline is a different matter, and the budgets are smaller than x86_64's:
+//
+//   copied B / BL   +/-128 MB
+//   copied ADRP     +/-4 GB
+//   copied ADR      +/-1 MB
+//
+// B and BL have a fallback: emit_prologue_copy replaces an unrelocatable one
+// with an indirect branch. **ADRP and ADR do not.** The patcher logs "Complex
+// PC-relative fixup not implemented" and returns SIZE_MAX, and the install is
+// refused. So on ARM64 a trampoline beyond 4 GB of its target cannot host a
+// prologue containing an ADRP -- and ADRP is how AArch64 reaches any global,
+// so it is common in the first four instructions.
+//
+// These tests pin the arithmetic on any host. What they do NOT establish is
+// how far `mmap(nullptr)` actually lands from a loaded library on Android;
+// that needs a device, and is measured separately in test_arm64_reach.cpp.
+
+namespace {
+
+// ADRP X3, #+0x1000 — the vector from adrp_positive_page above.
+constexpr std::uint32_t kAdrpX3PlusOnePage = 0xB0000003u;
+
+// Recover the page displacement an ADRP encodes, so a relocation can be
+// checked against the address it resolves to rather than against a bit pattern.
+std::int64_t adrp_offset_of(std::uint32_t insn) {
+    const std::int64_t immlo = (insn >> 29) & 0x3;
+    const std::int64_t immhi = (insn >> 5) & 0x7FFFF;
+    std::int64_t offset = ((immhi << 2) | immlo) << 12;
+    if (offset & 0x100000000LL) {
+        offset |= static_cast<std::int64_t>(0xFFFFFFFE00000000ULL);
+    }
+    return offset;
+}
+
+// Both boundary calls use the same target; this keeps the literal in one place.
+const void* old_pc_of(const void*) {
+    return reinterpret_cast<const void*>(0x0000100000000000ULL);
+}
+
+} // namespace
+
+TEST(Arm64Disasm, fix_adrp_succeeds_within_4gb) {
+    const auto old_pc = reinterpret_cast<const void*>(0x0000007000001000ULL);
+    const auto new_pc = reinterpret_cast<const void*>(0x0000007000000000ULL);
+
+    const std::uint32_t fixed = fix_pc_relative_instruction(
+        kAdrpX3PlusOnePage, InstructionType::Adrp, old_pc, new_pc);
+    ASSERT_NE(fixed, 0u) << "one page away must be relocatable";
+
+    // Same register, and it must still resolve to the same page.
+    EXPECT_EQ(fixed & 0x1Fu, 3u);
+    const std::int64_t old_page =
+        static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(old_pc)) & ~0xFFFLL;
+    const std::int64_t new_page =
+        static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(new_pc)) & ~0xFFFLL;
+    EXPECT_EQ(new_page + adrp_offset_of(fixed), old_page + 0x1000);
+}
+
+TEST(Arm64Disasm, fix_adrp_refuses_beyond_4gb) {
+    const auto old_pc = reinterpret_cast<const void*>(0x0000007000001000ULL);
+    // ~45 TB away, the order of separation an unhinted anonymous mapping gets
+    // from loaded code on a 64-bit Linux.
+    const auto new_pc = reinterpret_cast<const void*>(0x00007F2C48000000ULL);
+
+    EXPECT_EQ(fix_pc_relative_instruction(kAdrpX3PlusOnePage,
+                                          InstructionType::Adrp, old_pc, new_pc),
+              0u)
+        << "beyond ADRP's +/-4 GB the displacement must be refused, not truncated";
+}
+
+TEST(Arm64Disasm, fix_adrp_boundary_is_four_gigabytes) {
+    // ADRP encodes a signed 21-bit page count, so the relocated displacement
+    // must satisfy -0x100000 <= (orig_target - new_page) >> 12 <= 0xFFFFF.
+    //
+    // Derived from orig_target rather than from old_pc, because the
+    // instruction carries its own +1 page and forgetting it moves the boundary
+    // by exactly one page -- which is how the first version of this test
+    // failed.
+    constexpr std::uint64_t kOldPc = 0x0000100000000000ULL;   // page-aligned
+    constexpr std::uint64_t kOrigTarget = kOldPc + 0x1000ULL;  // ADRP X3, #+0x1000
+
+    const auto at_limit =
+        reinterpret_cast<const void*>(kOrigTarget - (0xFFFFFULL << 12));
+    const auto one_page_past =
+        reinterpret_cast<const void*>(kOrigTarget - (0x100000ULL << 12));
+
+    EXPECT_NE(fix_pc_relative_instruction(kAdrpX3PlusOnePage,
+                                          InstructionType::Adrp, old_pc_of(at_limit),
+                                          at_limit),
+              0u) << "0xFFFFF pages is the last representable displacement";
+    EXPECT_EQ(fix_pc_relative_instruction(kAdrpX3PlusOnePage,
+                                          InstructionType::Adrp,
+                                          old_pc_of(one_page_past), one_page_past),
+              0u) << "one page further must be refused";
+}
+
+TEST(Arm64Disasm, fix_b_refuses_beyond_128mb) {
+    // B #+0x1000 — 0x14000000 | (0x1000 >> 2)
+    const std::uint32_t b_insn = 0x14000000u | (0x1000u >> 2);
+    ASSERT_EQ(analyze_instruction(&b_insn).type, InstructionType::B);
+
+    const auto old_pc = reinterpret_cast<const void*>(0x0000007000001000ULL);
+    const auto near_pc = reinterpret_cast<const void*>(0x0000007000000000ULL);
+    const auto far_pc = reinterpret_cast<const void*>(0x00007F2C48000000ULL);
+
+    EXPECT_NE(fix_pc_relative_instruction(b_insn, InstructionType::B, old_pc, near_pc), 0u);
+    // Unlike ADRP, this one has a fallback: emit_prologue_copy replaces an
+    // unrelocatable B with an indirect branch rather than failing the install.
+    // The refusal here is what triggers that path.
+    EXPECT_EQ(fix_pc_relative_instruction(b_insn, InstructionType::B, old_pc, far_pc), 0u);
+}
+
 // ─── calculate_copy_size ────────────────────────────────────────────────────
 
 TEST(Arm64Disasm, copy_size_minimum_16_bytes) {

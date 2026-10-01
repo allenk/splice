@@ -115,7 +115,7 @@ InstructionInfo analyze_instruction(const void* buffer, std::size_t max_size) {
     return info;
 }
 
-std::size_t calculate_copy_size(const void* target) {
+std::size_t calculate_copy_size(const void* target, std::size_t min_bytes) {
     const auto* bytes = static_cast<const std::uint8_t*>(target);
     std::size_t size = 0;
 
@@ -123,7 +123,7 @@ std::size_t calculate_copy_size(const void* target) {
     // function prologue that covers 16 bytes of patch space.
     constexpr std::size_t kWalkLimit = 64;
 
-    while (size < 16 && size < kWalkLimit) {
+    while (size < min_bytes && size < kWalkLimit) {
         const auto info = analyze_instruction(bytes + size, kWalkLimit - size);
         if (info.length == 0 || info.type == InstructionType::Unknown) {
             SPLICE_LOGE("calculate_copy_size: decode failed at offset %zu", size);
@@ -131,7 +131,8 @@ std::size_t calculate_copy_size(const void* target) {
         }
         size += info.length;
     }
-    SPLICE_LOGV("x86_64 calculate_copy_size: %zu", size);
+    SPLICE_LOGV("x86_64 calculate_copy_size: %zu (asked for %zu)",
+                size, min_bytes);
     return size;
 }
 

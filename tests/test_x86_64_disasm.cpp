@@ -230,6 +230,100 @@ TEST(X86Disasm, looks_hooked_null_is_safe) {
     EXPECT_FALSE(looks_hooked(nullptr));
 }
 
+// ─── relocate_instruction: the trampoline's distance is load-bearing ───────
+//
+// Relocating a PC-relative instruction means recomputing its operand so that,
+// executed from the trampoline, it still reaches what it reached from the
+// original address. The operand is a signed 32-bit displacement, so that is
+// only expressible while the trampoline is within 2 GB of the original target.
+//
+// Beyond that, relocate_instruction returns 0 -- "cannot fix in place" -- which
+// emit_prologue_copy turns into a fatal SIZE_MAX and install_inline_patch
+// refuses the hook. No warning names the distance; the symptom is a function
+// that will not hook.
+//
+// These are direct tests of the mechanism rather than of any real prologue.
+// Whether a given function trips it depends on whether a rel32 or RIP-relative
+// instruction happens to fall inside the copied bytes, and that window is now
+// 5 bytes rather than 16 -- see the min_bytes test below.
+
+namespace {
+
+// `mov eax, dword ptr [rip + 0]` — the shape of any access to a global in
+// position-independent x86_64 code.
+InstructionInfo rip_relative_info() {
+    const std::uint8_t bytes[] = {0x8B, 0x05, 0x00, 0x00, 0x00, 0x00};
+    return analyze_instruction(bytes, sizeof(bytes));
+}
+
+} // namespace
+
+TEST(X86Disasm, relocate_rip_relative_succeeds_within_rel32) {
+    const auto info = rip_relative_info();
+    ASSERT_EQ(info.type, InstructionType::RipRelative);
+    ASSERT_EQ(info.length, 6u);
+
+    const std::uint8_t src[] = {0x8B, 0x05, 0x00, 0x00, 0x00, 0x00};
+    // An arbitrary but plausible pair: the trampoline one page below the
+    // target, which is what the near-search actually produces.
+    const auto old_pc = reinterpret_cast<const void*>(0x00007FF890000000ULL);
+    const auto new_pc = reinterpret_cast<const void*>(0x00007FF88FFFF000ULL);
+
+    std::uint8_t out[16]{};
+    const std::size_t written =
+        relocate_instruction(info, src, old_pc, new_pc, out);
+
+    ASSERT_EQ(written, 6u);
+    EXPECT_EQ(out[0], 0x8B);
+    EXPECT_EQ(out[1], 0x05);
+
+    // The rewritten displacement must land on the same absolute address the
+    // original would have reached: old_pc + length + 0.
+    std::int32_t new_disp = 0;
+    std::memcpy(&new_disp, out + 2, 4);
+    const auto reached = reinterpret_cast<std::uintptr_t>(new_pc) + 6 +
+                         static_cast<std::intptr_t>(new_disp);
+    EXPECT_EQ(reached, reinterpret_cast<std::uintptr_t>(old_pc) + 6);
+}
+
+TEST(X86Disasm, relocate_rip_relative_refuses_beyond_rel32) {
+    const auto info = rip_relative_info();
+    ASSERT_EQ(info.type, InstructionType::RipRelative);
+
+    const std::uint8_t src[] = {0x8B, 0x05, 0x00, 0x00, 0x00, 0x00};
+    const auto old_pc = reinterpret_cast<const void*>(0x00005646043D6000ULL);
+    // 45 TB away — the separation actually measured between a Linux
+    // executable's code and an mmap with no address hint, in this very test
+    // binary. See tests/test_near_alloc.cpp.
+    const auto new_pc = reinterpret_cast<const void*>(0x00007FDDC3747000ULL);
+
+    std::uint8_t out[16]{0xCC};
+    EXPECT_EQ(relocate_instruction(info, src, old_pc, new_pc, out), 0u)
+        << "a displacement that cannot fit in int32 must be refused, not truncated";
+}
+
+TEST(X86Disasm, relocate_call_rel32_refuses_beyond_rel32) {
+    // Same boundary for a direct call, which is what a prologue that begins by
+    // calling a stack-check or profiling helper looks like.
+    const std::uint8_t src[] = {0xE8, 0x00, 0x00, 0x00, 0x00};
+    const auto info = analyze_instruction(src, sizeof(src));
+    ASSERT_EQ(info.type, InstructionType::CallRel32);
+
+    const auto old_pc = reinterpret_cast<const void*>(0x00005646043D6000ULL);
+    std::uint8_t out[16]{};
+
+    // Near: fine.
+    EXPECT_EQ(relocate_instruction(
+                  info, src, old_pc,
+                  reinterpret_cast<const void*>(0x00005646043D5000ULL), out),
+              5u);
+    // Far: refused.
+    EXPECT_EQ(relocate_instruction(
+                  info, src, old_pc,
+                  reinterpret_cast<const void*>(0x00007FDDC3747000ULL), out),
+              0u);
+}
+
 // ─── calculate_copy_size ───────────────────────────────────────────────────
 
 TEST(X86Disasm, calculate_copy_size_covers_typical_prologue) {
@@ -249,4 +343,33 @@ TEST(X86Disasm, calculate_copy_size_covers_typical_prologue) {
     auto size = calculate_copy_size(bytes);
     EXPECT_GE(size, 16u);
     EXPECT_EQ(size, 17u);  // ends at the natural instruction boundary
+}
+
+TEST(X86Disasm, calculate_copy_size_walks_only_as_far_as_the_patch_needs) {
+    // The very same prologue as above. Asked for 16 it answers 17, which does
+    // not fit the 16-byte record splice_disable restores from -- that is how a
+    // perfectly ordinary MSVC entry sequence used to arrive with disable
+    // switched off. Asked for 5, which is what an install through a relay
+    // actually writes, one instruction is enough.
+    const std::uint8_t bytes[] = {
+        0x55,                          // push rbp             (1)
+        0x48, 0x89, 0xE5,              // mov rbp, rsp         (3)  total 4
+        0x48, 0x83, 0xEC, 0x20,        // sub rsp, 0x20        (4)  total 8
+        0x53,                          // push rbx             (1)  total 9
+        0x41, 0x54,                    // push r12             (2)  total 11
+        0x41, 0x55,                    // push r13             (2)  total 13
+        0x48, 0x89, 0x7D, 0xF8,        // mov [rbp-8], rdi     (4)  total 17
+        0x90,                          // padding nop
+    };
+
+    EXPECT_EQ(calculate_copy_size(bytes, 16), 17u);   // the old worst case
+    EXPECT_EQ(calculate_copy_size(bytes, 5), 8u);     // push+mov+sub = 8 >= 5
+    EXPECT_EQ(calculate_copy_size(bytes), 17u);       // default is still 16
+
+    // Never short of what was asked for: the patcher writes patch_len bytes
+    // over the prologue, so a result below min_bytes would mean patching past
+    // the instructions that were moved aside.
+    for (std::size_t want : {1u, 5u, 8u, 14u, 16u}) {
+        EXPECT_GE(calculate_copy_size(bytes, want), want) << "want=" << want;
+    }
 }

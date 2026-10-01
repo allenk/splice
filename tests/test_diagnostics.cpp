@@ -124,3 +124,27 @@ TEST(Diagnostics, time_measurement_pattern_non_void) {
     EXPECT_EQ(count.load(), 100);
     EXPECT_GT(total_ns.load(), 0u);             // some elapsed time recorded
 }
+
+// ─── first-hit reporting ──────────────────────────────────────────────────
+// SPLICE_COUNT exists to answer "is this being called at all". Reporting only
+// every 65536th call made it silent for exactly the answers that matter: a
+// hook that fires once, or three times, or not at all. A 60 Hz target took
+// eighteen minutes to say anything.
+TEST(Diagnostics, ReportsFirstHitAndThenPeriodically) {
+    using splice::detail::diag::should_report;
+    using splice::detail::diag::kReportMask;
+
+    EXPECT_TRUE(should_report(1)) << "the first call must report";
+
+    // Quiet in between: this is the property that keeps the hot path cheap,
+    // and losing it would be a worse defect than the one being fixed.
+    for (std::uint64_t n = 2; n <= 1000; ++n) {
+        EXPECT_FALSE(should_report(n)) << "unexpected report at n=" << n;
+    }
+
+    // And the periodic dump still lands where it always did.
+    EXPECT_TRUE(should_report(kReportMask + 1));         // 65536
+    EXPECT_TRUE(should_report(2 * (kReportMask + 1)));   // 131072
+    EXPECT_FALSE(should_report(kReportMask));            // 65535
+    EXPECT_FALSE(should_report(kReportMask + 2));        // 65537
+}

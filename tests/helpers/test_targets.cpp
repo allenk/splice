@@ -21,4 +21,15 @@ SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int stress_target(int x) { return x + 1
 SPLICE_TEST_NOINLINE int policy_target_a(int x) { return x + 1; }
 SPLICE_TEST_NOINLINE int policy_target_b(int x) { return x * 2; }
 
+// Large enough that no compiler will fold it into an immediate, and non-const so
+// it is not placed in a section the access could reach some cheaper way.
+long g_pcrel_table[4096];
+
+SPLICE_TEST_NOINLINE long pcrel_prologue_target() {
+    // Three reads rather than one so the function is comfortably longer than the
+    // 16 bytes copied out of it -- copying past the end of a three-instruction
+    // function would be testing something else entirely.
+    return g_pcrel_table[0] + g_pcrel_table[1] + g_pcrel_table[2] + 1;
+}
+
 } // namespace splice::test

@@ -90,8 +90,29 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
 
     // Step 2 — allocate a trampoline with headroom for fixup indirect branches
     // plus the trailing jump-back.
+    //
+    // Near the target, because the prologue copied in below gets relocated and
+    // ARM64's relocation budgets are narrow enough that the distance decides
+    // whether the hook is possible at all: B/BL ±128 MB (has a fallback), ADRP
+    // ±4 GB (none — the install is refused), ADR ±1 MB (none).
+    //
+    // Without the hint this was measured at 101.8–166.8 GB on Android 14 and
+    // 85.33 TB on aarch64 Ubuntu, never once inside ADRP's range — so every one
+    // of the 18.8 % of libc++_shared.so functions with an ADRP or ADR in their
+    // first four instructions was unhookable. With it, ADRP and B are satisfied.
+    // tests/test_arm64_reach.cpp holds the measurement and guards this line.
+    //
+    // ADR's ±1 MB is NOT delivered by this and cannot be: for a target inside a
+    // large module the nearest free page lies past the module's own pages, which
+    // is no allocator's fault: the nearest free page can simply be
+    // further away than the copied instruction can reach.
+    //
+    // A failed near-search is not fatal — allocate_executable_memory falls back
+    // to an OS-chosen address, and the relocator then refuses only the prologues
+    // it genuinely cannot fix, which is what it did for all of them before.
     const std::size_t trampoline_size = copy_size + 32;
-    void* trampoline = splice::os::allocate_executable_memory(trampoline_size);
+    void* trampoline =
+        splice::os::allocate_executable_memory(trampoline_size, target);
     if (trampoline == nullptr) {
         SPLICE_LOGE("install_inline_patch: trampoline allocation failed");
         return nullptr;

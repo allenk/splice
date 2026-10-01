@@ -28,6 +28,7 @@ add_executable(splice_unit_test
     test_core.cpp
     test_context.cpp
     test_arm64_disasm.cpp
+    test_arm64_reach.cpp
     test_x86_64_disasm.cpp
     test_hook_global.cpp
     test_hook_iat.cpp
@@ -38,6 +39,8 @@ add_executable(splice_unit_test
     test_hook_modifiers.cpp
     test_scoped_hook.cpp
     test_diagnostics.cpp
+    test_near_alloc.cpp
+    test_prologue_census.cpp
     test_hook_member.cpp
     stress_test.cpp
     helpers/test_targets.cpp

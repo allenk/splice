@@ -21,13 +21,79 @@
 
 namespace splice::arch::x86_64 {
 
+namespace {
+
+// The hardware guarantee is about an aligned quadword, not about `target`.
+//
+// Intel SDM Vol 3A 8.1.1 promises single-copy atomicity for a quadword aligned
+// on an 8-byte boundary. What has to live inside one such quadword is the
+// PATCH, not the function entry -- so a 5-byte `E9 rel32` starting at
+// `target & 7 == 3` is still one atomic store away, even though `target` itself
+// is unaligned. The requirement is simply offset + length <= 8.
+//
+// This matters more than it sounds. Splice used to demand `target & 7 == 0` and
+// fall back to a non-atomic memcpy otherwise. MSVC aligns function entries to
+// 16 bytes so Windows never noticed; GCC at -O0 packs small functions tightly,
+// and in Splice's own Linux suite only 4 of 13 distinct hook targets were
+// 8-byte aligned -- 10 of 14 installs took the torn-state path for no reason
+// other than an over-strict precondition.
+struct QuadwordSlot {
+    std::uint64_t* word;    // the aligned quadword containing the patch
+    unsigned       offset;  // where the patch starts inside it, 0..7
+    unsigned       room;    // bytes available from `offset` to the word's end
+};
+
+QuadwordSlot quadword_slot_for(void* target) noexcept {
+    const auto addr = reinterpret_cast<std::uintptr_t>(target);
+    const unsigned offset = static_cast<unsigned>(addr & 0x7u);
+    return QuadwordSlot{
+        reinterpret_cast<std::uint64_t*>(addr - offset),
+        offset,
+        8u - offset,
+    };
+}
+
+// Overlay `len` bytes at `slot.offset` inside the quadword, atomically.
+//
+// A compare-exchange loop rather than a plain store, because the bytes of the
+// quadword we are NOT changing do not all belong to us: bytes before
+// `slot.offset` belong to whatever precedes the function -- padding, or the tail
+// of a tightly packed neighbour that Splice might be patching at the same
+// moment. Reading them and storing them back would silently undo a concurrent
+// change to them. The loop costs nothing at install time and removes the
+// question.
+void atomic_overlay(const QuadwordSlot& slot, const std::uint8_t* bytes,
+                    unsigned len) noexcept {
+    std::atomic_ref<std::uint64_t> word_ref(*slot.word);
+    std::uint64_t expected = word_ref.load(std::memory_order_relaxed);
+    for (;;) {
+        std::uint8_t staging[8];
+        std::memcpy(staging, &expected, 8);
+        std::memcpy(staging + slot.offset, bytes, len);
+        std::uint64_t desired = 0;
+        std::memcpy(&desired, staging, 8);
+        if (word_ref.compare_exchange_weak(expected, desired,
+                                           std::memory_order_release,
+                                           std::memory_order_relaxed)) {
+            return;
+        }
+        // `expected` now holds the current value; rebuild the overlay on it.
+    }
+}
+
+}  // namespace
+
 bool atomic_install_jmp_rel32(void* target, void* new_func) noexcept {
-    // ── Precondition 1: 8-byte alignment ──────────────────────────────────
+    // ── Precondition 1: the 5-byte patch fits in one aligned quadword ─────
+    // Not "target is aligned" -- see quadword_slot_for above. offset <= 3 is
+    // exactly the condition offset + 5 <= 8.
     const auto target_addr = reinterpret_cast<std::uintptr_t>(target);
-    if ((target_addr & 0x7u) != 0) {
-        SPLICE_LOGW("x86_64 atomic_install: target=%p not 8-byte aligned (addr & 7 = %u); "
-                    "atomic path unavailable",
-                    target, static_cast<unsigned>(target_addr & 0x7u));
+    const QuadwordSlot slot = quadword_slot_for(target);
+    if (slot.room < 5) {
+        SPLICE_LOGW("x86_64 atomic_install: target=%p sits %u bytes into its "
+                    "quadword, so a 5-byte patch would straddle two; atomic "
+                    "path unavailable",
+                    target, slot.offset);
         return false;
     }
 
@@ -47,42 +113,28 @@ bool atomic_install_jmp_rel32(void* target, void* new_func) noexcept {
     SPLICE_LOGV("x86_64 atomic_install: target=%p new_func=%p rel32=0x%x",
                 target, new_func, static_cast<unsigned>(disp));
 
-    // ── Step 1: read original 8 bytes ────────────────────────────────────
-    // Treated as data; no atomic ordering needed here. We only need the
-    // upper 3 bytes (target+5..7) preserved in the new 8-byte word.
-    std::uint64_t original = 0;
-    std::memcpy(&original, target, 8);
-
-    // ── Step 2: construct the new 8-byte word in registers ────────────────
-    // Layout (little-endian, x86):
-    //   byte 0       = 0xE9                     (rel32 jmp opcode)
-    //   bytes 1..4   = rel32 (sign-extended low-32)
-    //   bytes 5..7   = original bytes 5..7      (preserve)
+    // ── Step 1+2: build the 5 patch bytes ────────────────────────────────
+    //   byte 0     = 0xE9            (rel32 jmp opcode)
+    //   bytes 1..4 = rel32           (sign-extended low-32)
     //
-    // Building via memcpy of an 8-byte staging buffer keeps the byte order
-    // explicit and platform-independent (won't break if anyone ever
-    // cross-compiles to a big-endian x86 ABI, which would be weird but...).
-    std::uint8_t new_bytes[8];
-    new_bytes[0] = 0xE9;
+    // Everything else in the quadword is left exactly as it is found, which is
+    // what atomic_overlay does. Nothing outside these five bytes is ours to
+    // change: bytes after the patch are the function's own continuation (the
+    // trampoline returns into them), and bytes before it, when target is
+    // unaligned, belong to whatever precedes the function.
+    std::uint8_t patch[5];
+    patch[0] = 0xE9;
     const auto rel32 = static_cast<std::int32_t>(disp);
-    std::memcpy(new_bytes + 1, &rel32, 4);  // bytes 1..4
-    // Preserve bytes 5..7 from the original word.
-    new_bytes[5] = static_cast<std::uint8_t>((original >> 40) & 0xFFu);
-    new_bytes[6] = static_cast<std::uint8_t>((original >> 48) & 0xFFu);
-    new_bytes[7] = static_cast<std::uint8_t>((original >> 56) & 0xFFu);
+    std::memcpy(patch + 1, &rel32, 4);
 
-    std::uint64_t new_word = 0;
-    std::memcpy(&new_word, new_bytes, 8);
+    // ── Step 3: one atomic read-modify-write on the containing quadword ──
+    // Per Intel SDM Vol 3A §8.1.1 an aligned quadword access is atomic with
+    // respect to instruction fetch, so no CPU can observe the patch half
+    // written. TSO gives release semantics for free.
+    atomic_overlay(slot, patch, 5);
 
-    // ── Step 3: atomic 8-byte write ──────────────────────────────────────
-    // std::atomic_ref<uint64_t>::store(release) on x86 lowers to a single
-    // aligned `mov qword ptr [target], reg` instruction. Per Intel SDM
-    // Vol 3A §8.1.1, aligned 8-byte stores are atomic with respect to
-    // instruction fetch. TSO gives us release semantics for free.
-    std::atomic_ref<std::uint64_t> word_ref(*static_cast<std::uint64_t*>(target));
-    word_ref.store(new_word, std::memory_order_release);
-
-    SPLICE_LOGV("x86_64 atomic_install: done");
+    SPLICE_LOGV("x86_64 atomic_install: done (word=%p offset=%u)",
+                static_cast<void*>(slot.word), slot.offset);
     return true;
 }
 
@@ -98,64 +150,54 @@ bool atomic_disable_inline(void* target,
         return false;
     }
 
-    const auto target_addr = reinterpret_cast<std::uintptr_t>(target);
-    if ((target_addr & 0x7u) != 0) {
-        // Target not 8-byte aligned — the aligned quadword atomic store is
-        // unavailable, exactly as in atomic_install_jmp_rel32. Mirror the
-        // installer's non-atomic fallback (x86_64/patcher.cpp): restore the
-        // saved prologue via a plain byte copy. The residual hazard — a
-        // concurrent in-flight instruction fetch could observe torn state —
-        // is the same one the non-atomic install path already documents.
-        // The engine has made the page writable and flushes the i-cache
-        // after we return. Functions are 16-byte aligned under default MSVC /
-        // Clang / GCC codegen, so this path is rare (it shows up for tiny
-        // funcs the linker packs tightly, e.g. some -O0 ELF builds).
-        SPLICE_LOGW("x86_64 atomic_disable: target=%p not 8-byte aligned; using "
-                    "non-atomic memcpy restore (%u bytes). Caller threads may "
-                    "observe torn state.",
-                    target, len);
+    const QuadwordSlot slot = quadword_slot_for(target);
+    if (slot.room < 5) {
+        // The 5 live patch bytes straddle two quadwords, so no single atomic
+        // access covers them — the same condition that made the install
+        // non-atomic, and reached for the same targets. Mirror the installer's
+        // fallback: restore by plain byte copy, with the same residual hazard
+        // that path already documents. The engine has made the page writable
+        // and flushes the i-cache after we return.
+        SPLICE_LOGW("x86_64 atomic_disable: target=%p sits %u bytes into its "
+                    "quadword; using non-atomic memcpy restore (%u bytes). "
+                    "Caller threads may observe torn state.",
+                    target, slot.offset, len);
         std::memcpy(target, pre_hook_bytes, len);
         return true;
     }
 
-    SPLICE_LOGV("x86_64 atomic_disable: target=%p len=%u", target, len);
+    SPLICE_LOGV("x86_64 atomic_disable: target=%p len=%u offset=%u",
+                target, len, slot.offset);
 
-    // ── Step 1: restore bytes [8..len) non-atomically ────────────────────
-    // These bytes are unreachable from execution flow while the active
-    // patch at [0..4] (atomic install) or [0..13] (abs64 install) is in
-    // place. TSO ordering guarantees these stores are globally visible
-    // before the atomic store in step 3 lands.
-    if (len > 8) {
-        std::memcpy(static_cast<std::uint8_t*>(target) + 8,
-                    pre_hook_bytes + 8,
-                    len - 8);
+    // ── Step 1: restore the bytes past the quadword, non-atomically ──────
+    // Everything from the end of the containing quadword onwards is
+    // unreachable while the live patch still sits at [0..5): flow leaves the
+    // function before reaching it. TSO guarantees these stores are globally
+    // visible before the atomic overlay in step 3 lands.
+    //
+    // This is the same trick the install side uses for the relay, in reverse:
+    // put the non-atomic writes where nobody is executing, then flip with one
+    // atomic access.
+    const unsigned inside = len < slot.room ? len : slot.room;
+    if (len > inside) {
+        std::memcpy(static_cast<std::uint8_t*>(target) + inside,
+                    pre_hook_bytes + inside,
+                    len - inside);
     }
 
-    // ── Step 2: build the new 8-byte word from saved bytes [0..min(len,8)) ──
-    // For len < 8, the upper bytes of the word stay as they currently are
-    // on disk (which is whatever the install left there — either preserved
-    // original bytes for the atomic-install case, or the tail of an abs64
-    // jmp for the non-atomic case). We always merge with saved bytes when
-    // available: if len >= 8 use saved[0..7] verbatim; if len < 8 use
-    // saved[0..len-1] for the low part, current[len..7] for the high.
-    std::uint64_t new_word = 0;
-    if (len >= 8) {
-        std::memcpy(&new_word, pre_hook_bytes, 8);
-    } else {
-        std::uint8_t buf[8];
-        std::memcpy(buf, target, 8);                  // current bytes
-        std::memcpy(buf, pre_hook_bytes, len);         // overlay saved low bytes
-        std::memcpy(&new_word, buf, 8);
-    }
+    // ── Step 2: the bytes that go back inside the quadword ───────────────
+    // Only the saved prologue's first `inside` bytes. Everything else in the
+    // quadword is left as found: bytes past the patch were either restored in
+    // step 1 or were never disturbed, and bytes before it -- when target is
+    // unaligned -- were never ours.
 
-    // ── Step 3: aligned 8-byte atomic store ──────────────────────────────
-    // Mirrors atomic_install — Intel SDM §8.1.1 single-copy atomicity for
-    // aligned quadword stores. Release ordering pairs with subsequent
-    // hardware instruction fetches from this address.
-    std::atomic_ref<std::uint64_t> word_ref(*static_cast<std::uint64_t*>(target));
-    word_ref.store(new_word, std::memory_order_release);
+    // ── Step 3: one atomic read-modify-write, and the hook is gone ───────
+    // Mirrors atomic_install. After this lands, flow follows the original
+    // prologue again; no CPU can observe a half-restored instruction.
+    atomic_overlay(slot, pre_hook_bytes, inside);
 
-    SPLICE_LOGV("x86_64 atomic_disable: done");
+    SPLICE_LOGV("x86_64 atomic_disable: done (word=%p offset=%u inside=%u)",
+                static_cast<void*>(slot.word), slot.offset, inside);
     return true;
 }
 

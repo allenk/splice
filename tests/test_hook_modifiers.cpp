@@ -303,3 +303,69 @@ TEST(HookModifiers, gates_consumed_per_action_verb) {
     for (int i = 0; i < 5; ++i) tramp(1);
     EXPECT_EQ(hits.load(), 5);                  // second .before fires every call
 }
+
+// ─── .observe() — did anything actually call this? ────────────────────────
+// is_installed() and splice_is_hooked() report that an address is patched.
+// Neither can report that a call site still reaches it, and the difference is
+// how a correct hook comes to look broken: a compiler that can see the
+// target's body may prove it pure and fold the call away.
+TEST(HookModifiers, observe_counts_entries_and_reports_absence) {
+    using Gen = splice::TrampolineGenerator<int (*)(int), 70090>;
+    splice::InterceptorEntry<int (*)(int)> entry(
+        nullptr, reinterpret_cast<void*>(&double_it), "test",
+        70090, Gen::get_trampoline_ptr());
+    const int slot = slot_of<Gen>();
+    splice::OriginalRegistry::set_original<int (*)(int)>(slot, &double_it);
+
+    // Not observing: nullopt, which is a different answer from zero.
+    EXPECT_FALSE(entry.invocations().has_value())
+        << "a hook never asked to count must not claim zero";
+
+    std::atomic<int> fired{0};
+    entry.observe().onInvoke([&](int (*orig)(int), int x) {
+        fired.fetch_add(1, std::memory_order_relaxed);
+        return orig(x);
+    });
+
+    ASSERT_TRUE(entry.invocations().has_value());
+    EXPECT_EQ(*entry.invocations(), 0u) << "observing, nothing called yet";
+
+    auto* tramp = reinterpret_cast<int (*)(int)>(Gen::get_trampoline_ptr());
+    for (int i = 0; i < 7; ++i) (void)tramp(i);
+
+    EXPECT_EQ(fired.load(), 7);
+    ASSERT_TRUE(entry.invocations().has_value());
+    EXPECT_EQ(*entry.invocations(), 7u);
+}
+
+// A call the gate turns away still arrived. The counter answers "did anything
+// call this", not "did my lambda run", and those separate exactly when a hook
+// looks silent.
+TEST(HookModifiers, observe_counts_calls_gated_away_by_when) {
+    using Gen = splice::TrampolineGenerator<int (*)(int), 70091>;
+    splice::InterceptorEntry<int (*)(int)> entry(
+        nullptr, reinterpret_cast<void*>(&double_it), "test",
+        70091, Gen::get_trampoline_ptr());
+    const int slot = slot_of<Gen>();
+    splice::OriginalRegistry::set_original<int (*)(int)>(slot, &double_it);
+
+    std::atomic<bool> allow{false};
+    std::atomic<int> fired{0};
+    entry.observe()
+         .when([&] { return allow.load(std::memory_order_relaxed); })
+         .onInvoke([&](int (*orig)(int), int x) {
+             fired.fetch_add(1, std::memory_order_relaxed);
+             return orig(x);
+         });
+
+    auto* tramp = reinterpret_cast<int (*)(int)>(Gen::get_trampoline_ptr());
+    for (int i = 0; i < 5; ++i) (void)tramp(i);
+    EXPECT_EQ(fired.load(), 0) << "the gate is closed";
+    ASSERT_TRUE(entry.invocations().has_value());
+    EXPECT_EQ(*entry.invocations(), 5u) << "but five calls still arrived";
+
+    allow.store(true, std::memory_order_relaxed);
+    for (int i = 0; i < 3; ++i) (void)tramp(i);
+    EXPECT_EQ(fired.load(), 3);
+    EXPECT_EQ(*entry.invocations(), 8u);
+}

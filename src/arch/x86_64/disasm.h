@@ -39,10 +39,22 @@ struct InstructionInfo {
 // successful decode even at the edge of a buffer.
 InstructionInfo analyze_instruction(const void* buffer, std::size_t max_size);
 
-// Walk instructions from `target` until we've covered at least 16 bytes
-// (enough to overwrite with a 14-byte absolute jmp). Rounds up to the
-// nearest full instruction boundary. Returns 0 on decode failure.
-std::size_t calculate_copy_size(const void* target);
+// Walk instructions from `target` until at least `min_bytes` are covered,
+// rounding up to the nearest whole instruction. Returns 0 on decode failure.
+//
+// `min_bytes` is the length of the patch that will actually be written, and
+// asking for more than that is not free: every extra byte demanded here is
+// another instruction relocated into the trampoline, another chance that the
+// relocation cannot be expressed, and a longer original-bytes record for
+// splice_disable to restore.
+//
+// The default is the worst case, a 14-byte `FF 25` absolute jmp rounded up to
+// 16. A patcher that has arranged for its destination to be within rel32 --
+// see the relay in arch/x86_64/patcher.cpp -- should pass 5 instead. The
+// difference is not cosmetic: MSVC entry sequences of 17 and 19 bytes are
+// common, and those overflow the 16-byte disable record, which is why
+// splice_disable used to be unavailable on ordinary functions.
+std::size_t calculate_copy_size(const void* target, std::size_t min_bytes = 16);
 
 // Relocate a PC-relative instruction to fire correctly at `new_pc` instead
 // of `old_pc`. Writes the rewritten instruction to `out_buffer` and

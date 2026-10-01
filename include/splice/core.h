@@ -28,6 +28,8 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <cstdint>
+#include <optional>
 
 namespace splice {
 
@@ -171,6 +173,40 @@ public:
         return *this;
     }
 
+    // .observe() — count how many times the patched function was actually
+    // entered, readable afterwards through invocations().
+    //
+    // This exists because is_installed() and splice_is_hooked() answer a
+    // different question than the one people are usually asking. They report
+    // that an address is patched; they cannot report that any call site still
+    // reaches it. The two come apart -- a compiler that can see the target's
+    // body may prove it pure and fold the call away -- and the symptom is a
+    // correct, installed hook whose callback never fires, which reads like a
+    // library defect.
+    //
+    // Counts ENTRIES, not callback firings: a call gated away by .when() or
+    // spent past .times() still counts, because the question being answered is
+    // "did anything call this", not "did my lambda run". Off by default; the
+    // counter costs one relaxed increment and only exists when asked for.
+    InterceptorEntry& observe() {
+        if (!m_invocations) {
+            m_invocations = std::make_shared<std::atomic<std::uint64_t>>(0);
+        }
+        m_pending_gates.invocations = m_invocations;
+        return *this;
+    }
+
+    // How many times the patched function was entered, or nullopt when this
+    // hook was never told to observe.
+    //
+    // Deliberately optional rather than a plain zero. "Never called" and "I
+    // was not counting" are different answers, and collapsing them into 0 is
+    // exactly the ambiguity observe() was added to remove.
+    [[nodiscard]] std::optional<std::uint64_t> invocations() const noexcept {
+        if (!m_invocations) return std::nullopt;
+        return m_invocations->load(std::memory_order_relaxed);
+    }
+
     // Query — was install() actually successful?
     [[nodiscard]] bool is_installed() const noexcept { return m_installed; }
 
@@ -179,6 +215,18 @@ public:
     // For INLINE installs (Phase 4.5c-2), restores the original first
     // instruction word atomically; trampoline memory is leaked per
     // FR-013 documented limitation.
+    //
+    // "Atomically" is load-bearing and was, for a while, only true here. Until
+    // 2026-09-28 the POINTER_SWAP path was a plain assignment with a comment
+    // claiming atomicity, so this doc comment promised a guarantee the code did
+    // not provide — harmless on x86_64, which does not reorder store-store, and
+    // a real ordering hole on weakly-ordered ARM64. Both patchers now use
+    // std::atomic_ref with release ordering.
+    //
+    // What disable does NOT do: cancel calls already in flight. A thread inside
+    // the hook, inside the trampoline, or holding a pointer it has already
+    // loaded carries on to completion. It is a switch, not a drain — which is
+    // also why the trampoline can never be freed.
     //
     // Returns true on success. After successful disable, calls to the
     // hooked function go to the original behaviour again. The
@@ -192,7 +240,14 @@ public:
             return true;
         }
         if (err == -2) {
-            SPLICE_LOGW("InterceptorEntry::disable: INLINE Tier 2 not yet implemented (id=%d)",
+            // Unreachable today: splice_disable stopped returning -2 when
+            // Tier 2 landed in Phase 4.5c-2. Kept because -2 is part of the
+            // published C ABI, with a message that describes the code rather
+            // than a plan -- the old one said "not yet implemented", which is
+            // false and is exactly the kind of line someone reads as fact.
+            SPLICE_LOGW("InterceptorEntry::disable: engine reported an "
+                        "unimplemented tier (id=%d) — unexpected; Tier 2 has "
+                        "been implemented since Phase 4.5c-2",
                         m_unique_id);
         } else {
             SPLICE_LOGE("InterceptorEntry::disable: failed (err=%d, id=%d)", err, m_unique_id);
@@ -267,8 +322,13 @@ private:
     struct PendingGates {
         std::function<bool()>                   when_pred;
         std::shared_ptr<std::atomic<long long>> remaining;   // shared with lambda
+        std::shared_ptr<std::atomic<std::uint64_t>> invocations;  // .observe()
     };
     PendingGates m_pending_gates;
+    // Kept on the entry, not only in the gates: commit_with_gates clears
+    // m_pending_gates so the next action verb starts clean, and invocations()
+    // has to keep working after that.
+    std::shared_ptr<std::atomic<std::uint64_t>> m_invocations;
 
     // Wrap user-supplied invoke-shaped lambda with pending gates, push to
     // HookManager, and clear m_pending_gates.
@@ -279,7 +339,7 @@ private:
         PendingGates gates = std::move(m_pending_gates);
         m_pending_gates = {};
 
-        if (!gates.when_pred && !gates.remaining) {
+        if (!gates.when_pred && !gates.remaining && !gates.invocations) {
             // Fast path — no gates, store the lambda as-is.
             HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
                 .set_invoke(std::move(fn));
@@ -291,6 +351,11 @@ private:
         // null shared_ptr checks at call time.
         auto wrapped = [gates = std::move(gates), fn = std::move(fn)]
                        (FuncType orig, Args... args) -> Ret {
+            // Before the gates: a call turned away by .when() still arrived,
+            // and "nothing arrived" is the finding this counter is for.
+            if (gates.invocations) {
+                gates.invocations->fetch_add(1, std::memory_order_relaxed);
+            }
             if (gates.when_pred && !gates.when_pred()) {
                 return orig(args...);
             }

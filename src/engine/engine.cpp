@@ -47,6 +47,8 @@
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #   include <windows.h>
@@ -124,6 +126,64 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
 #endif
 }
 
+// ─── Addresses Splice has patched itself ───────────────────────────────────
+//
+// Exists for exactly one reason: unwrap_jump_stub below cannot tell a compiler
+// thunk from a patch Splice installed. Both are `E9 rel32`, and both are
+// `FF 25 disp32`. Byte inspection cannot separate them — which is why
+// splice_is_hooked(), being a byte test, is no use as a guard here.
+//
+// Membership means "there is a Splice patch at this address RIGHT NOW":
+// inserted on a successful inline install, erased by a Tier 2 disable that
+// restores the prologue. Current rather than historical is the more useful
+// reading of both questions asked of it -- once the original bytes are back, an
+// `E9` there really is the function's own first instruction and following it is
+// correct again.
+//
+// Touched only on install and disable, never on a call, so a plain mutex is the
+// right weight.
+std::mutex& patched_sites_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+// Maps a patched address to where we routed it. The destination is kept, not
+// just the fact of the patch, so that a repeated install can be told apart from
+// a competing one: install_all() re-runs every live installer each time it is
+// called, so "this exact hook again" is an ordinary event and must not be
+// reported as a failure, while "a different hook onto the same address" is the
+// one that has to be refused.
+std::unordered_map<const void*, void*>& patched_sites() {
+    static std::unordered_map<const void*, void*> sites;
+    return sites;
+}
+
+void remember_patched_site(const void* addr, void* routed_to) {
+    if (addr == nullptr) return;
+    const std::lock_guard<std::mutex> guard(patched_sites_mutex());
+    patched_sites()[addr] = routed_to;
+}
+
+void forget_patched_site(const void* addr) {
+    if (addr == nullptr) return;
+    const std::lock_guard<std::mutex> guard(patched_sites_mutex());
+    patched_sites().erase(addr);
+}
+
+bool is_own_patch_site(const void* addr) {
+    if (addr == nullptr) return false;
+    const std::lock_guard<std::mutex> guard(patched_sites_mutex());
+    return patched_sites().count(addr) != 0;
+}
+
+// Where this address was routed, or nullptr if we have not patched it.
+void* patch_destination_of(const void* addr) {
+    if (addr == nullptr) return nullptr;
+    const std::lock_guard<std::mutex> guard(patched_sites_mutex());
+    const auto it = patched_sites().find(addr);
+    return it == patched_sites().end() ? nullptr : it->second;
+}
+
 // Unwrap jump stubs so we hook the real function body, not an ILT entry.
 // Common chains on MSVC debug Windows x86_64:
 //   &func  --E9-->  ILT stub  --FF25-->  import thunk dereference  --> real
@@ -131,10 +191,30 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
 // common two-level chain reaches the real function, but a malformed
 // circular chain can't trap us forever. Idempotent on targets that
 // aren't stubs.
+//
+// **It must never follow one of Splice's own patches.** Doing so walks
+// `patched function --E9--> relay --FF25--> hook stub` and then treats
+// whatever the stub begins with as "the real function", so the next install
+// lands on an unrelated address — observed patching Splice's own relay and
+// then overflowing the stack. That is what patched_sites() guards, and the
+// guard has to be a registry rather than a byte test for the reason given
+// above.
+//
+// The hazard predates the relay: a near `E9` straight to the hook stub, or the
+// 14-byte `FF 25` form, were followed just the same. What changed is that the
+// second install used to fail harmlessly in emit_prologue_copy (walking 16
+// bytes off the end of a short function found something unrelocatable), so the
+// mis-targeting never got far enough to do damage.
 void* unwrap_jump_stub(void* target) {
 #if defined(SPLICE_HAS_X86_64_BACKEND)
     constexpr int kMaxDepth = 4;
     for (int depth = 0; depth < kMaxDepth && target != nullptr; ++depth) {
+        if (is_own_patch_site(target)) {
+            SPLICE_LOGV("unwrap_jump_stub[%d]: %p is our own patch site; "
+                        "stopping rather than following it",
+                        depth, target);
+            break;
+        }
         const auto* bytes = static_cast<const std::uint8_t*>(target);
 
         // E9 rel32 — relative near jump (MSVC ILT stub)
@@ -165,6 +245,36 @@ void* unwrap_jump_stub(void* target) {
     return target;
 }
 
+// Installs are serialised against each other.
+//
+// Without this, two threads hooking the same address both pass the
+// already-patched check before either records a patch, and both proceed to
+// install. The damage is not theoretical and not subtle:
+//
+//   * the page protection is not reference counted. Thread A finishes and calls
+//     restore_executable, turning the page back to PAGE_EXECUTE_READ while
+//     thread B is still writing into it -- an access violation inside the
+//     patcher, which is how this was found (V-4, eight threads calling
+//     install_all concurrently, exit 0xC0000005).
+//   * thread B's prologue copy can read the target AFTER thread A patched it,
+//     so B's trampoline contains A's jump and the two chain in a shape nobody
+//     designed.
+//
+// A single mutex over the whole function, rather than something finer per
+// target. Installing is not a hot path -- it happens once per hook, at startup
+// for nearly every consumer -- and the alternative is a lock ordered against
+// the patch-site registry, the OriginalRegistry, and whatever a pre-patch
+// callback touches. Detours and MinHook both serialise installs the same way,
+// for the same reason.
+//
+// Note what this does NOT make safe: patching a function while other threads
+// EXECUTE it. That is what the atomic install sequence is for, and it is
+// unrelated to this lock.
+std::mutex& install_mutex() {
+    static std::mutex m;
+    return m;
+}
+
 void* hook_by_address(void* target_addr, void* new_func, void** original_func,
                       PrePatchFn pre_cb = nullptr, void* pre_user = nullptr,
                       splice_patch_record* out_record = nullptr) {
@@ -172,6 +282,8 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
         SPLICE_LOGE("splice_hook_address: null target");
         return nullptr;
     }
+
+    const std::lock_guard<std::mutex> installing(install_mutex());
 
     // Follow one level of jump-stub indirection (MSVC ILT, DLL imports).
     target_addr = unwrap_jump_stub(target_addr);
@@ -225,11 +337,60 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
     // trampoline is built but before the atomic install lands. It also
     // snapshots the original prologue bytes for FR-013 Tier 2 disable
     // (Phase 4.5c-2) directly into the record's pre_hook_bytes buffer.
+    // Refuse to stack a second inline patch on an address we already patched.
+    //
+    // This is a deliberate refusal standing in for what used to be an accident.
+    // Before the prologue walk was shortened to the patch length, a second
+    // install here failed inside emit_prologue_copy -- walking 16 bytes over a
+    // patched short function found something unrelocatable -- and the outcome
+    // was "re-hooking quietly does not work". Shortening the walk removed that
+    // barrier, and what got through was not a working chain: the second
+    // trampoline copies the installed `E9` and relocates it back to the FIRST
+    // hook's relay, so the first hook's `original` re-enters the first hook.
+    // Observed result was an infinite loop and a stack overflow.
+    //
+    // Chaining onto an existing patch -- ours or somebody else's -- is a real
+    // feature and is wanted (a player's machine may already have Steam Overlay
+    // in the same slot). It needs the existing jump followed to find the true
+    // original, and it needs designing. Until then this returns a clear
+    // failure instead of a crash.
+    if (void* routed = patch_destination_of(target_addr); routed != nullptr) {
+        if (routed == new_func) {
+            // The same hook again. install_all() re-runs every live installer
+            // on each call, so this is routine, not an error -- and re-writing
+            // the patch would rebuild the trampoline from an already-patched
+            // prologue, which is the recursion described above. Report the
+            // existing site as the result: the caller asked for this address to
+            // route to this function, and it does.
+            SPLICE_LOGV("hook_by_address: %p already routed to %p; "
+                        "nothing to do",
+                        target_addr, new_func);
+            // Deliberately leaves *original_func and *out_record alone. A
+            // repeat can only come from the same entry -- new_func is that
+            // entry's own trampoline -- so both were filled by the first
+            // install and are still valid. Rewriting them from what this
+            // function knows now would replace good values with partial ones.
+            return target_addr;
+        }
+        SPLICE_LOGW("hook_by_address: %p already carries a Splice inline patch "
+                    "routed to %p; refusing to stack %p on top of it. "
+                    "Chaining onto an existing patch is not implemented",
+                    target_addr, routed, new_func);
+        return nullptr;
+    }
+
     unsigned char* bytes_out = (out_record != nullptr) ? out_record->pre_hook_bytes : nullptr;
     unsigned int*  len_out   = (out_record != nullptr) ? &out_record->pre_hook_byte_len : nullptr;
     void* result = install_inline_patch(target_addr, new_func, original_func,
                                         pre_cb, pre_user,
                                         bytes_out, len_out);
+    if (result != nullptr) {
+        // Before anything else: this address is now one of ours, so no later
+        // unwrap may follow the jump we just wrote, and no second hook may be
+        // stacked on it. Recorded whether or not the caller wanted a patch
+        // record.
+        remember_patched_site(target_addr, new_func);
+    }
     if (result != nullptr && out_record != nullptr) {
         out_record->strategy = SPLICE_PATCH_STRATEGY_INLINE;
         out_record->hook_site = target_addr;
@@ -295,10 +456,17 @@ void* splice_hook_symbol_pre_rec(const char* lib_name,
 }
 
 int splice_disable(const splice_patch_record* record) {
+    // Same lock as install, and for the same reason: this makes a page writable,
+    // writes, and makes it read-only again. Page protection is not reference
+    // counted, so a disable finishing while an install is mid-write on the same
+    // page revokes write access underneath it. Install and disable therefore
+    // exclude each other, not just their own kind.
     if (record == nullptr) {
         SPLICE_LOGE("splice_disable: null record");
         return -1;
     }
+
+    const std::lock_guard<std::mutex> disabling(install_mutex());
 
     switch (record->strategy) {
         case SPLICE_PATCH_STRATEGY_POINTER_SWAP: {
@@ -369,6 +537,11 @@ int splice_disable(const splice_patch_record* record) {
 
             splice::os::flush_instruction_cache(target, 16);
             splice::os::restore_executable(target, 16);
+
+            // The original bytes are back, so this address is no longer one of
+            // ours: a later install here is legitimate, and unwrap_jump_stub
+            // should read the prologue at face value again.
+            forget_patched_site(target);
 
             SPLICE_LOGI("Disabled (INLINE) at %p — trampoline %p leaked per FR-013",
                         target, record->trampoline);

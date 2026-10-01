@@ -133,17 +133,40 @@ void* splice_hook_symbol_pre_rec(const char* lib_name,
 //    0 on success
 //   -1 on failure (record invalid, slot value didn't match expected hook,
 //                  arch operation rejected, etc.)
-//   -2 on "tier not yet implemented" (currently INLINE / Tier 2)
+//   -2 is reserved and no longer returned. It once meant "tier not yet
+//      implemented", naming INLINE / Tier 2 -- which has been implemented since
+//      Phase 4.5c-2. Kept documented rather than deleted because it is part of a
+//      published C ABI and a caller may still test for it.
 //
 // After successful return, the patch is reversed:
-//   - POINTER_SWAP: the slot holds `pre_hook_pointer` again.
-//   - INLINE     : (when implemented) the prologue holds the original
-//                  bytes again; trampoline memory remains allocated.
+//   - POINTER_SWAP: the slot holds `pre_hook_pointer` again, written with a
+//                   release store (see iat_patcher.cpp / got_patcher.cpp).
+//   - INLINE      : the prologue holds the original bytes again, restored with
+//                   one atomic access to the word containing the patch.
+//                   Trampoline memory remains allocated -- permanently, and by
+//                   design: nothing in-process can prove no thread is still
+//                   executing inside it. See FR-013 Tier 3.
+//
+// What "reversed" does NOT mean, on either strategy: calls already in flight are
+// not cancelled. A thread inside the hook, or inside the trampoline, or holding
+// the old pointer it already loaded, carries on. Disable is a switch, not a
+// drain.
 int splice_disable(const splice_patch_record* record);
 
 // Probe helper — returns non-zero if `addr` looks like it was patched by
 // Splice (matches our trampoline signature). Not a security check; purely
 // a debugging aid.
+//
+// It answers "is this address patched", NOT "has the hook run". The two come
+// apart, and the gap is a trap worth naming: a compiler that can see the
+// target's body may prove it pure and replace the call with its result, so the
+// patch is installed and correct while no call site reaches it any more. The
+// symptom is this function returning non-zero beside a callback that never
+// fires, which reads like a Splice defect and is not one.
+//
+// To answer the other question, use SPLICE_COUNT / SPLICE_COUNT_ADDR — they
+// report on the first hit as well as periodically, so a hook that fires once
+// says so.
 int splice_is_hooked(const void* addr);
 
 // Diagnostic: log the first 8 instructions starting at `func_addr` via

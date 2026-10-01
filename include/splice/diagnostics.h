@@ -46,10 +46,22 @@ namespace splice::detail::diag {
 // purpose — keeps the hot path quiet.
 inline constexpr std::uint64_t kReportMask = 0xFFFF;   // every 65536 hits
 
+// ...and always the first hit.
+//
+// The periodic dump alone made these counters silent for the first 65535
+// calls, which is the opposite of what they are for. The question they exist
+// to answer is "is this being called at all", and the answer is most urgent
+// when it is 0 or 3 — a hook firing a handful of times reported nothing, and a
+// 60 Hz target took eighteen minutes to say anything. First-hit reporting
+// costs one comparison on a branch that was already there.
+[[nodiscard]] inline constexpr bool should_report(std::uint64_t n) noexcept {
+    return n == 1 || (n & kReportMask) == 0;
+}
+
 inline void report_count(const char* label,
                          std::atomic<std::uint64_t>& counter) noexcept {
     const auto n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
-    if ((n & kReportMask) == 0) {
+    if (should_report(n)) {
         SPLICE_LOGI("[COUNT] %s: %llu calls",
                     label, static_cast<unsigned long long>(n));
     }
@@ -61,7 +73,7 @@ inline void report_time(const char* label,
                         std::uint64_t dt_ns) noexcept {
     const auto t = total_ns.fetch_add(dt_ns, std::memory_order_relaxed) + dt_ns;
     const auto n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
-    if ((n & kReportMask) == 0) {
+    if (should_report(n)) {
         SPLICE_LOGI("[TIME] %s: avg=%llu ns (n=%llu, total=%llu ns)",
                     label,
                     static_cast<unsigned long long>(t / n),

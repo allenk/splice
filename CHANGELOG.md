@@ -4,6 +4,130 @@ All notable changes to Splice are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Everything below landed after `1.0.0` and went unrecorded until 2026-09-28.
+That gap is itself worth noting: `.observe()` is a **new public API**, and
+Splice treats the `splice::` surface as ABI-stable after Phase 1, so an
+unrecorded addition is exactly what this file is for.
+
+All of it came out of Splice's first consumer outside its own tests — the
+GpuThermalGuard game overlay, hooking `IDXGISwapChain::Present` in `dxgi.dll`.
+Known gaps that work surfaced and did **not** close are listed at the end of
+this section, under *Not fixed — recorded instead*.
+
+### Added
+- **`.observe()` / `invocations()`** on `InterceptorEntry` — count how many times
+  a patched function was actually entered, readable afterwards. Exists because
+  `is_installed()` and `splice_is_hooked()` answer a different question: they
+  report that an address is patched, not that any call site still reaches it.
+  The two come apart when a compiler can see the target's body, proves it pure
+  and folds the call away — which reads like a library defect. Counts on entry,
+  ahead of `.when()` and `.times()`: a call a gate turns away still arrived.
+  Off by default; one relaxed increment when asked for.
+
+### Changed
+- **x86_64 installs are now atomic by arrangement rather than by luck.** The
+  5-byte `E9 rel32` patch reaches ±2 GB, and `new_func` lives in the consumer's
+  module wherever that loaded — routinely further. Splice now allocates the
+  trampoline near the target and puts a 14-byte **relay** beside it, so the live
+  prologue only ever takes 5 bytes inside one aligned quadword. Measured against
+  `dxgi.dll` with the hook 28.7 GB away: still `atomic, via relay`, 240/240
+  presents intercepted windowed and 239/239 at 3840×2160 on hardware.
+- **`splice::os::allocate_executable_memory` takes an optional `near_addr`.**
+  Default `nullptr` preserves the previous behaviour for every existing caller.
+  Win32 walks free regions with `VirtualQuery`; POSIX runs a bounded
+  `MAP_FIXED_NOREPLACE` probe and range-checks every result. Falls back to an
+  OS-chosen address, so callers must still cope with a far result.
+- **The prologue walk now stops at the patch length instead of always 16 bytes.**
+  `calculate_copy_size` gained a `min_bytes` argument, defaulting to the old 16.
+  Since the relay guarantees a 5-byte patch, the x86_64 patcher passes 5.
+  Observed prologues dropped from 16–19 bytes to 5–9, and of 69 installs in one
+  suite run, 59 now disturb **zero** bytes of the live target beyond the single
+  atomic store.
+- **Diagnostics report the first hit, not only every 65536th.** `SPLICE_COUNT`
+  and `SPLICE_TIME` were silent until a hook had fired 65 536 times, which for
+  anything but a hot loop meant silent.
+
+### Fixed
+- **`splice_disable` is available on ordinary functions again.** The 16-byte walk
+  made an MSVC entry sequence round up to 17 or 19 bytes and overflow the
+  16-byte record `splice_disable` restores from, so Tier 2 came back
+  unavailable. 24 of the installs in Splice's own suite hit it, `Present` among
+  them at 19 bytes. Now zero.
+- **`unwrap_jump_stub` no longer follows Splice's own patches.** It exists to
+  skip MSVC ILT stubs and import thunks and follows `E9` and `FF 25`, which is
+  indistinguishable from an installed patch — so a second install walked
+  `patched fn → relay → hook stub` and patched whatever it landed on, observed
+  patching Splice's own relay. The engine now keeps a registry of live patch
+  sites and stops at one; a byte test such as `splice_is_hooked()` cannot make
+  this distinction and is not used for it.
+- **A second, different hook on an already-patched address is refused instead of
+  corrupting the first.** Stacking did not chain: the second trampoline
+  relocated the installed `E9` back to the first hook's relay, so hook one's
+  `original` re-entered hook one — infinite recursion, `0xC00000FD`. Chaining
+  deliberately is still wanted; see *Not fixed* below.
+- **A repeat install of the same hook is a silent no-op.** `install_all()` re-runs
+  every live installer on each call, so this is routine; it previously either
+  re-patched an already-patched prologue or, after the refusal above, logged a
+  failure. Recognised by destination: same `new_func` returns the existing site,
+  a different one is refused.
+
+### Fixed (continued — the same integration, later the same day)
+- **The atomic install precondition was one level too strict.** It required the
+  hook target itself to be 8-byte aligned; the hardware rule is that an *aligned
+  quadword* access is atomic, so what must fit in one is the 5 patch bytes:
+  `target & 7 <= 3`. MSVC aligns entries to 16 bytes so Windows never saw it;
+  under GCC only 4 of 13 targets in Splice's own Linux suite were aligned, and
+  10 of 14 installs took the torn-state path for no reason. Now 10 of 14 are
+  atomic. Install and disable both write through the containing quadword with a
+  compare-exchange, because the untouched bytes of that word may belong to a
+  tightly packed neighbour.
+- **Tier 1 (GOT/IAT) was not actually atomic.** `*entry = new_func;` with a
+  comment asserting atomicity, and `core.h` promising it. No ordering either, so
+  a reader could observe the new pointer before the `OriginalRegistry` write
+  that makes it usable. Invisible on TSO x86_64; a real hole on weakly-ordered
+  ARM64. Now `std::atomic_ref` with `memory_order_release`; identical codegen on
+  x86_64.
+- **`unwrap_jump_stub` no longer follows Splice's own patches**, and a second
+  distinct hook on an already-patched address is refused rather than producing
+  infinite recursion. A repeat install of the *same* hook is a silent no-op.
+ 
+- **Two public headers corrected.** `engine.h` documented `-2` as "tier not yet
+  implemented (currently INLINE / Tier 2)" and the INLINE restore as "(when
+  implemented)"; Tier 2 has shipped since Phase 4.5c-2 and `-2` is never
+  returned. `core.h`'s `disable()` promised Tier 1 atomicity the code did not
+  provide. Both now describe the code, and both state what disable does *not*
+  do: calls already in flight are not cancelled.
+
+### Fixed — ARM64 (2026-09-29)
+- **ARM64 now allocates the trampoline near the target.** The copied prologue is
+  relocated, and AArch64's relocation budgets are narrow: `B`/`BL` ±128 MB (with
+  a fallback), `ADRP` ±4 GB and `ADR` ±1 MB (no fallback — the install is
+  refused). Without a hint the trampoline was measured 101.8–166.8 GB from a
+  function in the executable on Android 14, and 85.33 TB on aarch64 Ubuntu —
+  never once inside `ADRP` range — so any such function with an `ADRP` in its
+  first four instructions could not be hooked inline. With the hint the
+  trampoline lands about 1 MB away and `ADRP` and `B` are both satisfied.
+  Verified on device by A/B: with the hint removed, installing over a real
+  `ADRP` prologue fails; with it, the hook is entered and `disable()` restores
+  the prologue.
+- Measured alongside: a function in a **shared library** was already within
+  `ADRP` and `B` range without any hint (29–86 MB on Android), because anonymous
+  mappings and shared libraries come from the same region while the executable
+  sits at a different base.
+
+### Not fixed — recorded instead
+- **`ADR` in a copied ARM64 prologue.** Its ±1 MB reach is not delivered by
+  near-allocation and cannot be: for a target inside a large module the nearest
+  free page lies past the module's own pages, and beside a shared library it was
+  obtainable in only 3 of 13 measured attempts. The fix is to materialise the
+  address absolutely (`movz` + three `movk`) instead of relocating the `ADR`,
+  which is not yet implemented, so such prologues are still refused.
+- **Chaining onto a patch somebody *else* installed** — Steam Overlay in the same
+  slot — is still not supported. Splice refuses cleanly rather than corrupting
+  the existing patch.
+
 ## [1.0.0] - 2026-06-03
 
 First production release. Splice is a type-safe, fluent, cross-platform C++20

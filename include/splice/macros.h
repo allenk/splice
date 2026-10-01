@@ -16,6 +16,8 @@
 // ───────────────────────────────────────────────────────────────────────────
 #pragma once
 
+#include <type_traits>
+
 #include <splice/core.h>
 
 // ─── arity-dispatch plumbing ────────────────────────────────────────────────
@@ -49,7 +51,23 @@
 // glibc `malloc` is `void*(*)(size_t) noexcept` — match the non-noexcept
 // template specialisations. No-op for ordinary signatures. See traits.h.
 #define SPLICE_DEDUCE_FN(funcname)  splice::remove_function_noexcept_t<decltype(&funcname)>
-#define SPLICE_DEDUCE_PTR(func_ptr) splice::remove_function_noexcept_t<decltype(func_ptr)>
+
+// The _PTR form additionally strips cv and reference qualifiers, which
+// `decltype` on an expression keeps and the template specialisations do not
+// match. `auto* const p = reinterpret_cast<Fn>(addr);` deduces
+// `int (*const)(int)` and fails to compile with an undefined-type error naming
+// InterceptorEntry, which says nothing about the actual cause.
+//
+// Same shape as the noexcept problem above, and found the same way: a qualifier
+// that is part of the type reaching specialisations written without it. Worth
+// stripping here rather than asking every caller to place the cast correctly --
+// `auto* const` is the natural way to write a target resolved at run time.
+//
+// remove_cv_t + remove_reference_t rather than remove_cvref_t: this header has
+// to stay C++17-compatible for AOSP consumers, and remove_cvref_t is C++20.
+#define SPLICE_DEDUCE_PTR(func_ptr)                            \
+    splice::remove_function_noexcept_t<                        \
+        std::remove_cv_t<std::remove_reference_t<decltype(func_ptr)>>>
 
 // ─── 2-arg form: explicit lib + func name ───────────────────────────────────
 #define SPLICE_HOOK_IMPL(libname, funcname, uniqueId)                                        \

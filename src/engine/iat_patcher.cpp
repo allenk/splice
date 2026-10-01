@@ -25,6 +25,7 @@
 
 #include <splice/log.h>
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -128,7 +129,25 @@ bool patch_iat_entry(void** iat_entry, void* new_func) {
         return false;
     }
 
-    *iat_entry = new_func;  // pointer-sized atomic write on x86_64
+    // Tier 1's whole claim is that this single write is atomic, so it is written
+    // as one -- std::atomic_ref rather than a plain store with a comment
+    // asserting the same thing.
+    //
+    // Codegen is identical on x86_64: a release store on a TSO machine is a
+    // plain `mov`. What changes is everything else. A plain store gives the
+    // abstract machine no guarantee at all, and no ordering: a reader can
+    // observe the new pointer before the writes that made it usable --
+    // OriginalRegistry among them, which hook_by_address fills in immediately
+    // before this line. x86_64 does not reorder store-store, so the bug never
+    // appeared there, but **ARM64 is weakly ordered and this same file is
+    // compiled for it**, where a reader on another core genuinely can see the
+    // new function pointer while still seeing a stale registry and call through
+    // a null original.
+    //
+    // Tier 2 (atomic_patch.cpp) has always done this properly. Tier 1, the tier
+    // documented as "the only one that is fully safe on all platforms", did not.
+    std::atomic_ref<void*> slot(*iat_entry);
+    slot.store(new_func, std::memory_order_release);
 
     DWORD restore_unused = 0;
     if (!::VirtualProtect(iat_entry, sizeof(void*), old_protect, &restore_unused)) {

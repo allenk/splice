@@ -4,11 +4,22 @@
 // PC-relative fixup, appends a jump-back to (target + prologue_size), and
 // overwrites the prologue with a jump to `new_func`.
 //
-// Atomicity note (FR-011): the prologue overwrite is a plain memcpy — not
-// atomic under concurrent execution of `target`. Phase 4.5 replaces it
-// with a proper int3 + xchg sequence per Intel's "cross-modifying code"
-// guidance.
+// Both the trampoline and a 14-byte relay are placed within rel32 range of
+// the target where the address space allows, which is what lets the prologue
+// patch stay 5 bytes long -- and therefore atomic. See step 2 and step 4b.
+//
+// Atomicity note (FR-011): the 5-byte case installs through an aligned
+// 8-byte atomic store (atomic_patch.cpp). The 14-byte fallback remains a
+// plain memcpy and is not atomic under concurrent execution of `target`; it
+// is now reached only when no memory was free within 2 GB of the target.
 // ───────────────────────────────────────────────────────────────────────────
+// NOMINMAX must precede any include that might reach <windows.h> -- plog does,
+// by way of splice/log.h, and its min/max macros would otherwise eat
+// numeric_limits<>::min(). Same guard as atomic_patch.cpp.
+#ifndef NOMINMAX
+#   define NOMINMAX
+#endif
+
 #include "patcher.h"
 
 #include "atomic_patch.h"
@@ -29,6 +40,28 @@ namespace {
 // walk limit in disasm.cpp) plus a 14-byte absolute jmp back plus headroom
 // for promoted rel8 → rel32 branches. 128 bytes is ample.
 constexpr std::size_t kTrampolineReserve = 128;
+
+// The relay is a single 14-byte `FF 25` absolute jump; see step 4b. It sits
+// after the trampoline in the same allocation, so one near-search serves both
+// and releasing the trampoline releases it too -- MEM_RELEASE and munmap both
+// work from the base of the original reservation.
+constexpr std::size_t kRelayOffset   = kTrampolineReserve;
+constexpr std::size_t kRelayReserve  = 16;
+constexpr std::size_t kNearBlockSize = kTrampolineReserve + kRelayReserve;
+
+// Can a 5-byte `E9 rel32` placed at `from` reach `to`?
+//
+// atomic_install_jmp_rel32 and emit_jmp_rel32 each check this for themselves,
+// so nothing depends on this being right. It is here to CHOOSE between two
+// destinations before either is asked -- so that a relay which landed far is
+// not preferred over a new_func that happens to be near.
+bool within_rel32(const void* from, const void* to) noexcept {
+    const auto src = reinterpret_cast<std::int64_t>(from);
+    const auto dst = reinterpret_cast<std::int64_t>(to);
+    const std::int64_t disp = dst - (src + 5);
+    return disp >= std::numeric_limits<std::int32_t>::min() &&
+           disp <= std::numeric_limits<std::int32_t>::max();
+}
 
 // Emit the prologue copy with PC-relative fixup. Returns the number of
 // bytes written into `dst`, or SIZE_MAX on fatal failure.
@@ -82,14 +115,108 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     }
     SPLICE_LOGV("x86_64 install_inline_patch: target=%p new_func=%p", target, new_func);
 
-    // Step 1 — measure prologue.
-    const std::size_t copy_size = calculate_copy_size(target);
-    if (copy_size == 0) {
-        SPLICE_LOGE("install_inline_patch: prologue decode failed");
+    // Step 1 — place the trampoline and its relay, near the target.
+    //
+    // This comes before measuring anything because the order is load-bearing:
+    // how far away this block lands decides how long the prologue patch will
+    // be, and how long the patch will be decides how much prologue has to be
+    // moved out of its way. Measuring first would mean measuring against a
+    // worst case that is now usually avoidable.
+    //
+    // Proximity is not a micro-optimisation; it buys two separate things, both
+    // about whether the install works at all. See the contract on
+    // allocate_executable_memory in src/os/memory.h.
+    void* trampoline =
+        splice::os::allocate_executable_memory(kNearBlockSize, target);
+    if (trampoline == nullptr) {
+        SPLICE_LOGE("install_inline_patch: trampoline alloc failed");
         return nullptr;
     }
 
-    // Step 1b — snapshot original bytes for FR-013 Tier 2 disable. Must
+    // Step 2 — the relay, and why the install needs one.
+    //
+    // The prologue patch we want is a 5-byte `E9 rel32`, which reaches
+    // +/-2 GB. `new_func` is compiled code in the consumer's module, and where
+    // that module loaded is not ours to choose: across a 64-bit address space
+    // it is routinely further away than that. Jumping straight to it then
+    // needs the 14-byte `FF 25` form -- and 14 bytes cannot be written as one
+    // store, so a thread already executing inside `target` (a game's render
+    // thread in Present, to name the case this was built for) can observe half
+    // the old instruction and half the new one.
+    //
+    // So we do not jump to new_func. We jump to a relay sitting beside the
+    // trampoline, inside rel32 range, whose entire body is a 14-byte absolute
+    // jump to new_func. Those 14 non-atomic bytes are still written -- but
+    // into memory nothing is executing yet, because the relay is finished and
+    // cache-flushed before the live function's prologue is touched. What lands
+    // on the live function is 5 bytes inside a single aligned quadword.
+    //
+    // One indirection is added to every intercepted call: a jmp to a hot cache
+    // line, then a jmp through an adjacent pointer. That is what Detours and
+    // MinHook both pay for the same guarantee -- MinHook calls the same object
+    // a "relay function".
+    // Always emitted, not always used -- see the destination choice below. It
+    // costs 14 bytes of an allocation we already made and removes a branch from
+    // the failure path: if the direct jump turns out to be unavailable, the
+    // relay is already there and already cache-flushed.
+    auto* const relay = static_cast<std::uint8_t*>(trampoline) + kRelayOffset;
+    const std::size_t relay_len = emit_jmp_abs64(relay, new_func);
+
+    // Use the relay only when it buys something.
+    //
+    // The relay exists to shorten the patch when `new_func` is out of rel32
+    // range. When it is already in range -- which is every hook whose callback
+    // lives in the same module as its target, so most of them -- routing
+    // through the relay adds a jump to every intercepted call and shortens
+    // nothing, because the patch would have been 5 bytes either way.
+    //
+    // Measured, same machine, same session, bench_hook_overhead
+    // BM_HookedCall_Active: 23.6 ns/call direct against 24.8 ns/call through
+    // the relay. +1.2 ns, +5%, for nothing when the direct jump is available.
+    //
+    // So: prefer new_func, fall back to the relay, and only then to the
+    // 14-byte form. The overlay case -- a hook 28.7 GB from dxgi.dll -- still
+    // gets the relay and still gets an atomic install; a same-module hook now
+    // pays exactly what it paid before any of this existed.
+    void* jump_dest = new_func;
+    if (!within_rel32(target, new_func) && within_rel32(target, relay)) {
+        jump_dest = relay;
+    }
+    [[maybe_unused]] const bool via_relay = jump_dest != new_func;
+
+    // How long the patch will be: 5 bytes when its destination is reachable
+    // by rel32, 14 when nothing is. Everything below measures against this
+    // rather than against the 14-byte worst case.
+    const std::size_t patch_len_planned = within_rel32(target, jump_dest) ? 5 : 14;
+
+    // Step 3 — measure the prologue, to the length of the patch that will
+    // actually be written.
+    //
+    // Walking further than necessary is not conservatism, it is three separate
+    // costs: more instructions to relocate (each of which may turn out to be
+    // unrelocatable and fail the install outright), more bytes of the caller's
+    // function disturbed, and an original-bytes record that may no longer fit
+    // in the 16 bytes splice_disable has to restore from.
+    const std::size_t copy_size = calculate_copy_size(target, patch_len_planned);
+    if (copy_size == 0) {
+        SPLICE_LOGE("install_inline_patch: prologue decode failed");
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
+    if (copy_size < patch_len_planned) {
+        // Unreachable: the walk above does not stop short of min_bytes for any
+        // length this code asks for. Checked rather than assumed because being
+        // wrong writes the patch past the prologue that was moved aside, into
+        // an instruction still expected to execute -- in someone else's
+        // process.
+        SPLICE_LOGE("install_inline_patch: copy_size=%zu below planned patch "
+                    "length %zu; refusing to patch",
+                    copy_size, patch_len_planned);
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
+
+    // Step 3b — snapshot original bytes for FR-013 Tier 2 disable. Must
     // happen before any write to `target`. Cap at 16 (record buffer size).
     if (pre_hook_bytes_out != nullptr && pre_hook_byte_len_out != nullptr) {
         if (copy_size <= 16) {
@@ -97,38 +224,35 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
             *pre_hook_byte_len_out = static_cast<unsigned int>(copy_size);
         } else {
             // Prologue too large for the disable record; leave len=0 so
-            // splice_disable returns -1 with a clear error.
+            // splice_disable returns -1 with a clear error. Much rarer now
+            // that the walk stops at 5 rather than 16 -- a 17- or 19-byte MSVC
+            // entry sequence used to land here routinely.
             *pre_hook_byte_len_out = 0;
             SPLICE_LOGW("install_inline_patch: copy_size=%zu > 16; disable will be unavailable",
                         copy_size);
         }
     }
 
-    // Step 2 — allocate trampoline.
-    void* trampoline = splice::os::allocate_executable_memory(kTrampolineReserve);
-    if (trampoline == nullptr) {
-        SPLICE_LOGE("install_inline_patch: trampoline alloc failed");
-        return nullptr;
-    }
-
-    // Step 3 — copy + fix prologue into trampoline.
+    // Step 4 — copy + fix prologue into trampoline.
     auto* dst = static_cast<std::uint8_t*>(trampoline);
     const std::size_t used = emit_prologue_copy(dst,
                                                 static_cast<const std::uint8_t*>(target),
                                                 copy_size, target);
     if (used == static_cast<std::size_t>(-1)) {
-        splice::os::free_executable_memory(trampoline, kTrampolineReserve);
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
         return nullptr;
     }
 
-    // Step 4 — append 14-byte absolute jmp back to (target + copy_size).
+    // Step 5 — append 14-byte absolute jmp back to (target + copy_size).
     auto* return_addr = static_cast<std::uint8_t*>(target) + copy_size;
     const std::size_t tail = emit_jmp_abs64(dst + used, return_addr);
     const std::size_t total = used + tail;
 
-    // Step 5 — flush trampoline cache (no-op on x86, but keep the API
-    // symmetric with ARM64 for portability).
+    // Step 6 — flush trampoline cache (no-op on x86, but keep the API
+    // symmetric with ARM64 for portability). Covers the relay as well, which
+    // must be complete and visible before step 6 patches the target.
     splice::os::flush_instruction_cache(trampoline, total);
+    splice::os::flush_instruction_cache(relay, relay_len);
 
     if (original_func != nullptr) {
         *original_func = trampoline;
@@ -144,10 +268,10 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
         on_trampoline_ready(trampoline, user_data);
     }
 
-    // Step 6 — make target writable, overwrite prologue, restore perms.
+    // Step 7 — make target writable, overwrite prologue, restore perms.
     if (!splice::os::make_executable_writable(target, 16)) {
         SPLICE_LOGE("install_inline_patch: can't RW target page");
-        splice::os::free_executable_memory(trampoline, kTrampolineReserve);
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
         return nullptr;
     }
 
@@ -158,7 +282,7 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     bool installed_atomic = false;
     std::size_t patch_len = 5;
 
-    if (atomic_install_jmp_rel32(target, new_func)) {
+    if (atomic_install_jmp_rel32(target, jump_dest)) {
         installed_atomic = true;
         // patch_len stays 5 — the atomic helper writes 8 bytes but only
         // bytes 0..4 are the new instruction; bytes 5..7 were preserved.
@@ -168,9 +292,9 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
         // existing emit helpers and write non-atomically. Documented in
         // the changelog as a residual hazard for that codepath.
         std::uint8_t hook_jump[14];
-        patch_len = emit_jmp_rel32(hook_jump, target, new_func);
+        patch_len = emit_jmp_rel32(hook_jump, target, jump_dest);
         if (patch_len == 0) {
-            patch_len = emit_jmp_abs64(hook_jump, new_func);
+            patch_len = emit_jmp_abs64(hook_jump, jump_dest);
         }
         SPLICE_LOGW("x86_64 install: atomic path unavailable, using non-atomic "
                     "memcpy (%zu bytes). Caller threads may observe torn state.",
@@ -190,11 +314,14 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     splice::os::flush_instruction_cache(target, copy_size);
     splice::os::restore_executable(target, copy_size);
 
-    if (installed_atomic) {
-        SPLICE_LOGV("x86_64 install_inline_patch: ok (atomic), %p -> %p", target, new_func);
-    } else {
-        SPLICE_LOGV("x86_64 install_inline_patch: ok (non-atomic), %p -> %p", target, new_func);
-    }
+    // Report the route, not just the outcome. "atomic" and "via relay" answer
+    // different questions, and when an install turns out non-atomic the next
+    // thing anyone wants to know is whether the relay was unavailable.
+    SPLICE_LOGV("x86_64 install_inline_patch: ok (%s, %s), %p -> %p "
+                "(patch=%zu prologue=%zu)",
+                installed_atomic ? "atomic" : "non-atomic",
+                via_relay ? "via relay" : "direct",
+                target, new_func, patch_len, copy_size);
     return target;
 }
 
