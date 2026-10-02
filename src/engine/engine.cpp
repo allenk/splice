@@ -408,6 +408,47 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
 
 extern "C" {
 
+void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
+                                        void** original_func,
+                                        splice_pre_patch_fn pre_cb, void* pre_user,
+                                        const unsigned char* expected_bytes,
+                                        unsigned int expected_size,
+                                        splice_patch_record* out_record) {
+#if defined(SPLICE_HAS_X86_64_BACKEND)
+    if (target_addr == nullptr || new_func == nullptr || expected_bytes == nullptr ||
+        expected_size != 16) return nullptr;
+    const std::lock_guard<std::mutex> installing(install_mutex());
+    if (is_own_patch_site(target_addr)) return nullptr;
+    unsigned char snapshot[16];
+    std::memcpy(snapshot, expected_bytes, sizeof(snapshot));
+    if (std::memcmp(target_addr, snapshot, sizeof(snapshot)) != 0) return nullptr;
+
+    // Reserve registry storage BEFORE publishing any target bytes. All other
+    // installers in this instance are excluded by install_mutex. On refusal
+    // nothing was published, so this provisional reservation is removed.
+    remember_patched_site(target_addr, new_func);
+    splice_patch_record record{};
+    void* original = nullptr;
+    void* result = splice::arch::x86_64::install_inline_patch(
+        target_addr, new_func, &original, pre_cb, pre_user,
+        record.pre_hook_bytes, &record.pre_hook_byte_len, snapshot);
+    if (result == nullptr) {
+        forget_patched_site(target_addr);
+        return nullptr;
+    }
+    record.strategy = SPLICE_PATCH_STRATEGY_INLINE;
+    record.hook_site = target_addr;
+    record.trampoline = original;
+    if (original_func != nullptr) *original_func = original;
+    if (out_record != nullptr) *out_record = record;
+    return result;
+#else
+    (void)target_addr; (void)new_func; (void)original_func; (void)pre_cb;
+    (void)pre_user; (void)expected_bytes; (void)expected_size; (void)out_record;
+    return nullptr;
+#endif
+}
+
 void* splice_hook_symbol(const char* lib_name,
                          const char* symbol_name,
                          void* new_func,

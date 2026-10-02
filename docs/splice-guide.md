@@ -60,7 +60,7 @@ splice::install_all();   // one-shot commit of all queued hooks
 | Strategy | When it kicks in | Safety |
 |---|---|---|
 | **POINTER_SWAP** (GOT/PLT on ELF, IAT on PE) | Functions imported via the dynamic linker | Tier 1: **atomic, fully reversible**, permanent disable |
-| **INLINE patch** (jmp rel32 on x86_64, indirect branch on ARM64) | Direct addresses / local functions / vtable slots | Tier 2: **atomic install**, **atomic disable**, trampoline memory leaked forever |
+| **INLINE patch** (jmp rel32 on x86_64, indirect branch on ARM64) | Direct addresses / local functions / vtable slots | Tier 2: atomic paths with implementation-dependent fallbacks; no execution-draining guarantee; trampoline memory retained |
 
 The engine tries POINTER_SWAP first, falls back to INLINE on failure.
 
@@ -118,14 +118,36 @@ policy override, see §6.2).
 | **`splice::ScopedHook`** | RAII — automatic disable when the object destructs |
 | `splice::install_all()` | Run every queued installer (each `SPLICE_HOOK_STATIC` queues one) |
 
-**Important: true uninstall + memory reclaim is NOT supported** — this is
-**architecturally impossible** for in-process non-privileged hooks (would
-require knowing no thread is currently executing inside the trampoline,
-which needs ptrace or root). Splice offers disable: behaviour is restored,
-the callback is preserved (re-installable), trampoline memory leaks. See
-§9 for the limitations chapter.
+**Important: true uninstall + memory reclaim is NOT supported.** Splice does
+not implement the execution-draining and lifetime protocol needed to reclaim
+trampolines or unload hook code. Disable restores the target route but does not
+cancel calls already in flight; callback storage and inline trampolines remain
+allocated. This is a limitation of the current implementation, not a universal
+privilege-based impossibility claim. See §9.
 
-### 3.6 Cross-signature, cross-arity
+### 3.6 Strict exact-site installation (low-level, x86_64)
+
+`splice_hook_address_strict_pre_rec` is an opt-in C ABI entry point. Existing
+install APIs keep their behavior. The strict entry point does not unwrap jumps
+or substitute GOT/IAT slots: it either patches the supplied address or refuses.
+
+The caller provides a matching snapshot of exactly 16 readable target bytes and
+must exclude both invocation and mutation throughout installation. The callback
+must not throw, mutate target code or reenter install/disable. Supported prologues
+are deliberately restricted; this is not a universal foreign-hook detector.
+
+The installed jump is five bytes fitting inside one aligned quadword, direct or
+via a near relay. There is no ordinary-copy fallback and no tail padding write.
+Refusal does not invoke the callback or change caller output/record. Success
+reports the exact INLINE site and the five modified original bytes. Repeated
+installation, including an own hook, is refused. Other architectures refuse.
+
+**This is not a busy-host installation API.** It does not coordinate thread
+contexts, provide successful-hook unloading, or restore arbitrary original page
+protection flags; the current OS layer returns affected pages to executable/read.
+The fluent interface does not select this policy yet.
+
+### 3.7 Cross-signature, cross-arity
 
 - Any `Ret(Args...)` function can be hooked, **arity is unbounded** (variadic templates)
 - `void` returns, C linkage, calling conventions are auto-deduced
@@ -352,25 +374,33 @@ Full bench: [`fr-010-performance-summary.md`](./fr-010-performance-summary.md)
 
 ## 9. Limits and danger zones (HARD truths)
 
-### 9.1 The physical limit of in-process non-priv hooking
+### 9.1 Installation, disable, and reclamation are different contracts
 
-**Can't do:** After a hook is installed, safely free trampoline memory and
-restore the original prologue to 100% pristine state **while guaranteeing**
-that no thread is currently executing inside the trampoline.
+Splice does not provide safe trampoline reclamation or DLL unloading after
+publishing a hook. Restoring the target route does not drain calls already in
+flight, including a thread in a callee with a saved return address into hook
+code or a trampoline. An instruction-pointer snapshot alone misses that case.
 
-**Why:** It would require:
-1. Enumerating every thread — `/proc/self/task` or Win32 `Thread32First`
-2. Suspending each — `SIGSTOP` (needs ptrace) or `SuspendThread`
-3. Inspecting each thread's instruction pointer to see if it's inside the
-   trampoline — `GetThreadContext`
+On Windows, thread enumeration, suspension and context inspection depend on
+the relevant access rights; elevation is not a universal requirement for a
+process's own threads. That does not make a complete coordination protocol
+trivial: lock ownership, new threads, error recovery and saved execution state
+must all be addressed. Other platforms have different APIs and constraints;
+this guide makes no platform-wide impossibility claim.
 
-All of these need elevated privileges. Splice is an in-process non-priv
-library — **it can't**.
+Likewise, an atomic target write is not a proof of safe installation while
+another thread is inside the overwritten instruction sequence. Current x86_64
+installation can also fall back to ordinary writes and performs separate tail
+padding. Do not infer busy-host installation safety from an atomic-path log.
+Require caller-controlled quiescence until a supported coordination contract
+exists.
 
-**Splice's compromise:** Tier 1/2 disable — behaviour is restored (the
-callback no longer runs), but memory isn't. Any hook library that claims
-"safe in-process uninstall" is either lying or playing Russian roulette
-(ShadowHook's occasional SIGILL is exactly this class of bug).
+**Current lifecycle policy:** disable restores routing, not execution lifetime.
+Keep callback code and inline trampolines resident while in-flight execution
+may reference them. A drawing gate is not an uninstall operation.
+
+References: [Windows thread access rights](https://learn.microsoft.com/en-us/windows/win32/procthread/thread-security-and-access-rights)
+and [Detours thread enlistment](https://github.com/microsoft/Detours/wiki/DetourUpdateThread).
 
 ### 9.2 Don't call a hooked function from inside its own callback
 

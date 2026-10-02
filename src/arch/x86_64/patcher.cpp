@@ -108,9 +108,15 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
                            PrePatchFn on_trampoline_ready,
                            void* user_data,
                            unsigned char* pre_hook_bytes_out,
-                           unsigned int* pre_hook_byte_len_out) {
+                           unsigned int* pre_hook_byte_len_out,
+                           const unsigned char* strict_expected_bytes) {
     if (target == nullptr || new_func == nullptr) {
         SPLICE_LOGE("install_inline_patch: null target or new_func");
+        return nullptr;
+    }
+    const bool strict = strict_expected_bytes != nullptr;
+    if (strict && ((reinterpret_cast<std::uintptr_t>(target) & 7u) > 3u ||
+                   std::memcmp(target, strict_expected_bytes, 16) != 0)) {
         return nullptr;
     }
     SPLICE_LOGV("x86_64 install_inline_patch: target=%p new_func=%p", target, new_func);
@@ -188,6 +194,11 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // by rel32, 14 when nothing is. Everything below measures against this
     // rather than against the 14-byte worst case.
     const std::size_t patch_len_planned = within_rel32(target, jump_dest) ? 5 : 14;
+    PreparedRel32Patch prepared{};
+    if (strict && !prepare_atomic_jmp_rel32(target, jump_dest, prepared)) {
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
 
     // Step 3 — measure the prologue, to the length of the patch that will
     // actually be written.
@@ -197,7 +208,28 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // unrelocatable and fail the install outright), more bytes of the caller's
     // function disturbed, and an original-bytes record that may no longer fit
     // in the 16 bytes splice_disable has to restore from.
-    const std::size_t copy_size = calculate_copy_size(target, patch_len_planned);
+    std::size_t copy_size = 0;
+    if (strict) {
+        // Bound every decode by the supplied snapshot. Reject control flow in
+        // the relocated prefix rather than interpreting a thunk as provenance.
+        // FF conservatively rejects the whole group (including indirect jumps).
+        while (copy_size < 5) {
+            const auto info = analyze_instruction(strict_expected_bytes + copy_size,
+                                                   16 - copy_size);
+            if (info.length == 0 || info.type == InstructionType::Unknown ||
+                (info.type != InstructionType::Regular &&
+                 info.type != InstructionType::RipRelative) ||
+                info.opcode == 0xff || info.opcode == 0xc3 || info.opcode == 0xc2 ||
+                info.opcode == 0xcb || info.opcode == 0xca ||
+                (info.opcode >= 0xe0 && info.opcode <= 0xe3)) {
+                splice::os::free_executable_memory(trampoline, kNearBlockSize);
+                return nullptr;
+            }
+            copy_size += info.length;
+        }
+    } else {
+        copy_size = calculate_copy_size(target, patch_len_planned);
+    }
     if (copy_size == 0) {
         SPLICE_LOGE("install_inline_patch: prologue decode failed");
         splice::os::free_executable_memory(trampoline, kNearBlockSize);
@@ -220,8 +252,9 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // happen before any write to `target`. Cap at 16 (record buffer size).
     if (pre_hook_bytes_out != nullptr && pre_hook_byte_len_out != nullptr) {
         if (copy_size <= 16) {
-            std::memcpy(pre_hook_bytes_out, target, copy_size);
-            *pre_hook_byte_len_out = static_cast<unsigned int>(copy_size);
+            const auto recorded_size = strict ? 5 : copy_size;
+            std::memcpy(pre_hook_bytes_out, target, recorded_size);
+            *pre_hook_byte_len_out = static_cast<unsigned int>(recorded_size);
         } else {
             // Prologue too large for the disable record; leave len=0 so
             // splice_disable returns -1 with a clear error. Much rarer now
@@ -254,6 +287,20 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     splice::os::flush_instruction_cache(trampoline, total);
     splice::os::flush_instruction_cache(relay, relay_len);
 
+    // Complete the fallible permission change before publishing the trampoline.
+    // A failed change frees it; neither output nor callback may retain it then.
+    const std::size_t writable_size = strict ? 5 : 16;
+    if (!splice::os::make_executable_writable(target, writable_size)) {
+        SPLICE_LOGE("install_inline_patch: can't RW target page");
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
+    if (strict && std::memcmp(target, strict_expected_bytes, 16) != 0) {
+        splice::os::restore_executable(target, writable_size);
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
+
     if (original_func != nullptr) {
         *original_func = trampoline;
         SPLICE_LOGV("x86_64 trampoline at %p (used=%zu bytes)", trampoline, total);
@@ -268,12 +315,7 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
         on_trampoline_ready(trampoline, user_data);
     }
 
-    // Step 7 — make target writable, overwrite prologue, restore perms.
-    if (!splice::os::make_executable_writable(target, 16)) {
-        SPLICE_LOGE("install_inline_patch: can't RW target page");
-        splice::os::free_executable_memory(trampoline, kNearBlockSize);
-        return nullptr;
-    }
+    // Step 7 — overwrite prologue, restore perms.
 
     // FR-011 / Phase 4.5b: atomic install for 5-byte E9 rel32 case.
     // Try the atomic path first (aligned 8-byte write per Intel SDM §8.1.1);
@@ -282,7 +324,12 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     bool installed_atomic = false;
     std::size_t patch_len = 5;
 
-    if (atomic_install_jmp_rel32(target, jump_dest)) {
+    if (strict) {
+        // All rejection decisions preceded publication. Commit only the
+        // prepared write; there is no fallible admission path after callback.
+        commit_atomic_jmp_rel32(prepared);
+        installed_atomic = true;
+    } else if (atomic_install_jmp_rel32(target, jump_dest)) {
         installed_atomic = true;
         // patch_len stays 5 — the atomic helper writes 8 bytes but only
         // bytes 0..4 are the new instruction; bytes 5..7 were preserved.
@@ -307,12 +354,12 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // thread lands there. Bytes 5..7 of an atomic-installed E9 rel32 are
     // unreachable (jmp redirects flow before reaching them), so padding
     // there is only needed for instructions that were 6+ bytes long.
-    if (copy_size > patch_len) {
+    if (!strict && copy_size > patch_len) {
         std::memset(static_cast<std::uint8_t*>(target) + patch_len, 0x90,
                     copy_size - patch_len);
     }
-    splice::os::flush_instruction_cache(target, copy_size);
-    splice::os::restore_executable(target, copy_size);
+    splice::os::flush_instruction_cache(target, strict ? 5 : copy_size);
+    splice::os::restore_executable(target, strict ? writable_size : copy_size);
 
     // Report the route, not just the outcome. "atomic" and "via relay" answer
     // different questions, and when an install turns out non-atomic the next

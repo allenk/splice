@@ -14,6 +14,13 @@
 
 extern "C" {
 
+void* splice_hook_address_strict_pre_rec(void*, void*, void**,
+                                        splice_pre_patch_fn, void*,
+                                        const unsigned char*, unsigned int,
+                                        splice_patch_record*) {
+    return nullptr;
+}
+
 void* splice_hook_symbol(const char* lib_name,
                          const char* symbol_name,
                          void* /*new_func*/,

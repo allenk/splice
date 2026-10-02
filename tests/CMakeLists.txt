@@ -63,6 +63,46 @@ target_include_directories(splice_unit_test PRIVATE
 # to launch an aarch64 ELF. Just register a single ctest per binary on the
 # host's PATH, and let the user run the binaries manually on-device via adb.
 include(GoogleTest)
+if(NOT CMAKE_CROSSCOMPILING)
+    # Host-only failure path: real ARM64 patcher/decoder, no ARM instructions run.
+    add_executable(splice_arm64_patcher_failure_test
+        test_arm64_patcher_failure.cpp
+        ../src/arch/arm64/patcher.cpp
+        ../src/arch/arm64/disasm.cpp
+    )
+    target_include_directories(splice_arm64_patcher_failure_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(splice_arm64_patcher_failure_test PRIVATE
+        splice_warnings splice_sanitizers GTest::gtest_main)
+    gtest_discover_tests(splice_arm64_patcher_failure_test DISCOVERY_TIMEOUT 30)
+endif()
+if(SPLICE_HAS_X86_64_BACKEND AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(splice_strict_install_test test_strict_install.cpp)
+    target_include_directories(splice_strict_install_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(splice_strict_install_test PRIVATE
+        splice::splice splice_warnings splice_sanitizers GTest::gtest_main)
+    if(WIN32)
+        add_library(splice_strict_decoy SHARED helpers/strict_decoy.cpp)
+        target_include_directories(splice_strict_decoy PRIVATE ${CMAKE_SOURCE_DIR}/src)
+        target_link_libraries(splice_strict_decoy PRIVATE splice::splice splice_warnings)
+        target_link_libraries(splice_strict_install_test PRIVATE splice_strict_decoy)
+    endif()
+    gtest_discover_tests(splice_strict_install_test DISCOVERY_TIMEOUT 30)
+    # Real patcher with a deterministic OS fault seam; no production fault flags.
+    add_executable(splice_patcher_failure_test
+        test_patcher_failure.cpp
+        ../src/arch/x86_64/patcher.cpp
+        ../src/arch/x86_64/disasm.cpp
+        ../src/arch/x86_64/atomic_patch.cpp
+    )
+    target_include_directories(splice_patcher_failure_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/include)
+    target_include_directories(splice_patcher_failure_test SYSTEM PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/nmd)
+    target_link_libraries(splice_patcher_failure_test PRIVATE
+        splice_warnings splice_sanitizers GTest::gtest_main)
+    gtest_discover_tests(splice_patcher_failure_test DISCOVERY_TIMEOUT 30)
+endif()
 if(CMAKE_CROSSCOMPILING)
     add_test(NAME splice_smoke_test
              COMMAND ${CMAKE_COMMAND} -E echo

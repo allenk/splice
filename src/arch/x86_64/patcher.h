@@ -37,6 +37,7 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
                            PrePatchFn on_trampoline_ready = nullptr,
                            void* user_data = nullptr,
                            unsigned char* pre_hook_bytes_out = nullptr,
-                           unsigned int* pre_hook_byte_len_out = nullptr);
+                           unsigned int* pre_hook_byte_len_out = nullptr,
+                           const unsigned char* strict_expected_bytes = nullptr);
 
 } // namespace splice::arch::x86_64

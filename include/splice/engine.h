@@ -128,6 +128,26 @@ void* splice_hook_symbol_pre_rec(const char* lib_name,
                                  void* pre_user,
                                  splice_patch_record* out_record);
 
+// Opt-in x86_64 exact-site, strict-write install (not safe live installation).
+// Requires exactly 16 readable bytes at target and expected_bytes, with a
+// matching snapshot. No jump unwrapping or GOT/IAT substitution. Unsupported
+// prologues, including branch/jump stubs, are refused; this is not a detector
+// for all third-party hooks. Other architectures refuse without side effects.
+// Caller must exclude invocation and all mutation throughout this operation.
+// Target must be executable code on ordinary RX pages; the current OS layer
+// restores RX, not arbitrary original page protection flags.
+// pre_cb must be nonthrowing, nonmutating and must not reenter install/disable.
+// Only a five-byte rel32 patch fitting one aligned quadword is allowed; no
+// ordinary-copy fallback or padding writes. Success records INLINE at target.
+// Refusal returns null, leaves original_func and out_record unchanged, and
+// never calls pre_cb. Repeated installs are refused, including our own hooks.
+void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
+                                         void** original_func,
+                                         splice_pre_patch_fn pre_cb, void* pre_user,
+                                         const unsigned char* expected_bytes,
+                                         unsigned int expected_size,
+                                         splice_patch_record* out_record);
+
 // Disable a previously-installed hook described by `record`.
 // Returns:
 //    0 on success

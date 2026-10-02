@@ -136,6 +136,15 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // Step 5 — flush trampoline cache.
     splice::os::flush_instruction_cache(trampoline, total_used);
 
+    // Complete the fallible protection change before publishing ownership.
+    // On failure the trampoline is freed and must not escape through either
+    // the original-function output or a consumer's registry callback.
+    if (!splice::os::make_executable_writable(target, 16)) {
+        SPLICE_LOGE("install_inline_patch: failed to make target writable");
+        splice::os::free_executable_memory(trampoline, trampoline_size);
+        return nullptr;
+    }
+
     if (original_func != nullptr) {
         *original_func = trampoline;
         SPLICE_LOGV("Trampoline at %p size=%zu", trampoline, total_used);
@@ -150,12 +159,7 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
         on_trampoline_ready(trampoline, user_data);
     }
 
-    // Step 6 — make the target page writable, overwrite prologue, restore perms.
-    if (!splice::os::make_executable_writable(target, 16)) {
-        SPLICE_LOGE("install_inline_patch: failed to make target writable");
-        splice::os::free_executable_memory(trampoline, trampoline_size);
-        return nullptr;
-    }
+    // Step 6 — overwrite prologue, restore perms.
 
     // FR-011 / Phase 4.5a: atomic install — replaces the unsafe `memcpy`
     // from Phase 1 with the architecturally-correct ARMv8 sequence

@@ -83,7 +83,8 @@ void atomic_overlay(const QuadwordSlot& slot, const std::uint8_t* bytes,
 
 }  // namespace
 
-bool atomic_install_jmp_rel32(void* target, void* new_func) noexcept {
+bool prepare_atomic_jmp_rel32(void* target, void* new_func,
+                              PreparedRel32Patch& prepared) noexcept {
     // ── Precondition 1: the 5-byte patch fits in one aligned quadword ─────
     // Not "target is aligned" -- see quadword_slot_for above. offset <= 3 is
     // exactly the condition offset + 5 <= 8.
@@ -122,19 +123,21 @@ bool atomic_install_jmp_rel32(void* target, void* new_func) noexcept {
     // change: bytes after the patch are the function's own continuation (the
     // trampoline returns into them), and bytes before it, when target is
     // unaligned, belong to whatever precedes the function.
-    std::uint8_t patch[5];
-    patch[0] = 0xE9;
+    prepared.target = target;
+    prepared.bytes[0] = 0xE9;
     const auto rel32 = static_cast<std::int32_t>(disp);
-    std::memcpy(patch + 1, &rel32, 4);
+    std::memcpy(prepared.bytes + 1, &rel32, 4);
+    return true;
+}
 
-    // ── Step 3: one atomic read-modify-write on the containing quadword ──
-    // Per Intel SDM Vol 3A §8.1.1 an aligned quadword access is atomic with
-    // respect to instruction fetch, so no CPU can observe the patch half
-    // written. TSO gives release semantics for free.
-    atomic_overlay(slot, patch, 5);
+void commit_atomic_jmp_rel32(const PreparedRel32Patch& prepared) noexcept {
+    atomic_overlay(quadword_slot_for(prepared.target), prepared.bytes, 5);
+}
 
-    SPLICE_LOGV("x86_64 atomic_install: done (word=%p offset=%u)",
-                static_cast<void*>(slot.word), slot.offset);
+bool atomic_install_jmp_rel32(void* target, void* new_func) noexcept {
+    PreparedRel32Patch prepared{};
+    if (!prepare_atomic_jmp_rel32(target, new_func, prepared)) return false;
+    commit_atomic_jmp_rel32(prepared);
     return true;
 }
 
