@@ -3,6 +3,7 @@
 #include "os/memory.h"
 #include <array>
 #include <cstring>
+#include <vector>
 
 namespace {
 using namespace splice::os::win32;
@@ -258,7 +259,7 @@ TEST_F(ThreadTransaction, invalid_inputs_refuse_without_suspension) {
     ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
     EXPECT_EQ(commit_enlisted(plan, std::span<ThreadSlot>{}, publication, ops).stage,
               TransactionStage::input);
-    std::array<ThreadSlot, 129> too_many{};
+    std::vector<ThreadSlot> too_many(4097);
     EXPECT_EQ(commit_enlisted(plan, too_many, publication, ops).stage, TransactionStage::input);
     publication.store(block);
     EXPECT_EQ(commit_enlisted(plan, slots, publication, ops).stage, TransactionStage::input);
@@ -270,5 +271,51 @@ TEST_F(ThreadTransaction, invalid_inputs_refuse_without_suspension) {
     slots[0].context_attempted = true;
     EXPECT_EQ(commit_enlisted(plan, slots, publication, ops).stage, TransactionStage::input);
     EXPECT_EQ(ops.suspends, 0u);
+}
+
+TEST_F(ThreadTransaction, large_sets_preserve_order_and_suspend_counts) {
+    for (const std::size_t count : {129u, 258u, 1024u, 4096u}) {
+        SCOPED_TRACE(count);
+        std::memcpy(block, expected.data(), 16);
+        publication.store(nullptr);
+        splice::arch::x86_64::PreparedStrictPatch plan;
+        ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
+        std::vector<FakeThread> many(count);
+        std::vector<ThreadSlot> enlisted(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            many[i].id = static_cast<DWORD>(10000 + count - i);
+            many[i].count = static_cast<DWORD>(i % 3);
+            many[i].context.Rip = reinterpret_cast<DWORD64>(block);
+            enlisted[i].handle = &many[i];
+        }
+        FakeOps local_ops;
+        ASSERT_EQ(commit_enlisted(plan, enlisted, publication, local_ops).outcome,
+                  TransactionOutcome::installed);
+        EXPECT_EQ(local_ops.suspends, count);
+        for (std::size_t i = 0; i < count; ++i) {
+            EXPECT_EQ(enlisted[i].handle, &many[i]);
+            EXPECT_EQ(many[i].count, i % 3);
+            EXPECT_EQ(many[i].resumes, 1u);
+            EXPECT_FALSE(enlisted[i].suspended);
+        }
+    }
+}
+
+TEST_F(ThreadTransaction, large_duplicate_set_refuses_before_suspension) {
+    splice::arch::x86_64::PreparedStrictPatch plan;
+    ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
+    std::vector<FakeThread> many(258);
+    std::vector<ThreadSlot> enlisted(many.size());
+    for (std::size_t i = 0; i < many.size(); ++i) {
+        many[i].id = static_cast<DWORD>(10000 + i);
+        enlisted[i].handle = &many[i];
+    }
+    many.back().id = many.front().id;
+    const auto result = commit_enlisted(plan, enlisted, publication, ops);
+    EXPECT_EQ(result.outcome, TransactionOutcome::refused);
+    EXPECT_EQ(result.stage, TransactionStage::identity);
+    EXPECT_EQ(ops.suspends, 0u);
+    EXPECT_EQ(publication.load(), nullptr);
+    EXPECT_EQ(std::memcmp(block, expected.data(), 16), 0);
 }
 }

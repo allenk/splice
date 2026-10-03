@@ -4,10 +4,13 @@
 #endif
 #include <windows.h>
 #include <atomic>
+#include <algorithm>
+#include <array>
 #include <span>
 #include "../../arch/x86_64/patcher.h"
 
 namespace splice::os::win32 {
+inline constexpr std::size_t max_enlisted_threads = 4096;
 enum class TransactionOutcome { refused, installed, recovery_required };
 enum class TransactionStage { input, identity, suspend, context, boundary, migrate,
                               commit, rollback, flush, resume, complete };
@@ -52,10 +55,13 @@ template<class Ops = NativeThreadOps>
 TransactionResult commit_enlisted(arch::x86_64::PreparedStrictPatch& plan,
     std::span<ThreadSlot> slots, std::atomic<void*>& publication, Ops& ops) noexcept {
     static_assert(std::atomic<void*>::is_always_lock_free);
-    if (!plan.prepared() || slots.empty() || slots.size() > 128 || publication.load())
+    if (!plan.prepared() || slots.empty() || slots.size() > max_enlisted_threads || publication.load())
         return {TransactionOutcome::refused, TransactionStage::input};
     const auto self = ops.current_thread();
     const auto process = ops.current_process();
+    // ID-only scratch preserves slot order and recovery bookkeeping. All
+    // validation/sorting occurs before the first suspension; no heap allocation.
+    std::array<DWORD, max_enlisted_threads> ids;
     for (std::size_t i = 0; i < slots.size(); ++i) {
         auto& slot = slots[i];
         if (!slot.handle || slot.suspended || slot.context_attempted)
@@ -63,10 +69,12 @@ TransactionResult commit_enlisted(arch::x86_64::PreparedStrictPatch& plan,
         slot.id = ops.thread_id(slot.handle);
         if (!slot.id || slot.id == self || ops.process_id(slot.handle) != process)
             return {TransactionOutcome::refused, TransactionStage::identity};
-        for (std::size_t j = 0; j < i; ++j) {
-            if (slots[j].id == slot.id)
-                return {TransactionOutcome::refused, TransactionStage::identity};
-        }
+        ids[i] = slot.id;
+    }
+    const auto end = ids.begin() + slots.size();
+    std::sort(ids.begin(), end);
+    if (std::adjacent_find(ids.begin(), end) != end) {
+        return {TransactionOutcome::refused, TransactionStage::identity};
     }
     const auto resume_all = [&]() noexcept {
         bool ok = true;
