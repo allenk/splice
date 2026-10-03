@@ -82,6 +82,7 @@ if(SPLICE_HAS_X86_64_BACKEND AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(splice_strict_install_test PRIVATE
         splice::splice splice_warnings splice_sanitizers GTest::gtest_main)
     if(WIN32)
+        target_sources(splice_strict_install_test PRIVATE test_thread_transaction.cpp)
         add_library(splice_strict_decoy SHARED helpers/strict_decoy.cpp)
         target_include_directories(splice_strict_decoy PRIVATE ${CMAKE_SOURCE_DIR}/src)
         target_link_libraries(splice_strict_decoy PRIVATE splice::splice splice_warnings)

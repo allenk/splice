@@ -44,6 +44,11 @@ public:
                  std::size_t expected_size);
     void* original() const noexcept { return storage_; }
     std::size_t copy_size() const noexcept { return copy_size_; }
+    void* target() const noexcept { return target_; }
+    bool prepared() const noexcept { return storage_ && !committed_; }
+    // Recovery could leave a context pointing at unpublished storage. Retain
+    // it permanently and prevent further commits; this is not commit success.
+    void retain_storage() noexcept { committed_ = true; }
     // False means invalid plan or interior non-boundary IP; output unchanged.
     // IPs outside the displaced prefix are returned unchanged.
     bool map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept;

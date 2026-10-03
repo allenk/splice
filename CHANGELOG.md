@@ -17,6 +17,10 @@ Known gaps that work surfaced and did **not** close are listed at the end of
 this section, under *Not fixed — recorded instead*.
 
 ### Added
+- Internal Windows x64 enlisted-thread transaction primitive with fixed caller
+  slots, exact IP migration, release publication and explicit recovery outcomes.
+  Requires caller-guaranteed thread-set closure and exclusive suspend ownership;
+  it does not provide arbitrary-process safe attachment or automatic recovery.
 - Internal x86_64 `PreparedStrictPatch`: prepare without target mutation,
   instruction-boundary IP mapping, and an explicit caller-coordinated write.
   This is not a public live-install API and does not enumerate/suspend threads.
