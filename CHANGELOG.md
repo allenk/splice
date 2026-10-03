@@ -17,6 +17,10 @@ Known gaps that work surfaced and did **not** close are listed at the end of
 this section, under *Not fixed — recorded instead*.
 
 ### Added
+- Internal x86_64 `PreparedStrictPatch`: prepare without target mutation,
+  instruction-boundary IP mapping, and an explicit caller-coordinated write.
+  This is not a public live-install API and does not enumerate/suspend threads.
+  Existing strict/legacy entry points retain their contracts.
 - **`.observe()` / `invocations()`** on `InterceptorEntry` — count how many times
   a patched function was actually entered, readable afterwards. Exists because
   `is_installed()` and `splice_is_hooked()` answer a different question: they
@@ -27,6 +31,9 @@ this section, under *Not fixed — recorded instead*.
   Off by default; one relaxed increment when asked for.
 
 ### Changed
+- RIP-relative forms with trailing immediates now fail closed instead of
+  corrupting their immediate with a misplaced displacement fixup. Supporting
+  them requires exact displacement-field metadata, not a length-minus-four guess.
 - **x86_64 installs are now atomic by arrangement rather than by luck.** The
   5-byte `E9 rel32` patch reaches ±2 GB, and `new_func` lives in the consumer's
   module wherever that loaded — routinely further. Splice now allocates the

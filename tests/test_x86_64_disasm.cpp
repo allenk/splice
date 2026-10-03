@@ -14,6 +14,17 @@
 
 using namespace splice::arch::x86_64;
 
+TEST(X86Disasm, rip_relative_trailing_immediate_is_refused_without_output) {
+    const std::uint8_t bytes[] = {0xc7, 0x05, 0x10, 0, 0, 0, 0x78, 0x56, 0x34, 0x12};
+    const auto info = analyze_instruction(bytes, sizeof(bytes));
+    std::array<std::uint8_t, 16> output;
+    output.fill(0x5a);
+    const auto before = output;
+    EXPECT_EQ(relocate_instruction(info, bytes, reinterpret_cast<void*>(0x10000),
+        reinterpret_cast<void*>(0x20000), output.data()), 0u);
+    EXPECT_EQ(output, before);
+}
+
 namespace {
 
 // Inline constructor for byte arrays — avoids the initializer-list ugliness

@@ -48,6 +48,40 @@ void flush_instruction_cache(void*, std::size_t) {}
 std::size_t page_size() { return 4096; }
 }
 
+TEST(PreparedPatchOwnership, cancellation_frees_without_touching_permissions) {
+    alignas(16) static std::array<std::uint8_t, 64> target{};
+    target.fill(0x90);
+    const auto before = target;
+    allocations = frees = writable_requests = restore_requests = 0;
+    {
+        splice::arch::x86_64::PreparedStrictPatch plan;
+        ASSERT_TRUE(plan.prepare(target.data(), target.data() + 32, before.data(), 16));
+        EXPECT_EQ(allocations, 1u);
+        EXPECT_EQ(frees, 0u);
+        EXPECT_EQ(writable_requests, 0u);
+        EXPECT_EQ(restore_requests, 0u);
+        EXPECT_EQ(target, before);
+    }
+    EXPECT_EQ(frees, 1u);
+}
+
+TEST(PreparedPatchOwnership, committed_storage_is_retained_without_os_calls) {
+    alignas(16) static std::array<std::uint8_t, 64> target{};
+    target.fill(0x90);
+    const auto before = target;
+    allocations = frees = writable_requests = restore_requests = 0;
+    {
+        splice::arch::x86_64::PreparedStrictPatch plan;
+        ASSERT_TRUE(plan.prepare(target.data(), target.data() + 32, before.data(), 16));
+        ASSERT_TRUE(plan.commit_write());  // Writable inert fixture, never executed.
+        EXPECT_EQ(target[0], 0xe9);
+        EXPECT_EQ(writable_requests, 0u);
+        EXPECT_EQ(restore_requests, 0u);
+    }
+    EXPECT_EQ(allocations, 1u);
+    EXPECT_EQ(frees, 0u);
+}
+
 // T-011-13: failure must not publish a trampoline that cleanup releases.
 TEST(PatcherFailure, denied_write_does_not_publish_or_modify_target) {
     alignas(16) std::array<std::uint8_t, 64> target{};

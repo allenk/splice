@@ -104,6 +104,89 @@ std::size_t emit_prologue_copy(std::uint8_t* dst, const std::uint8_t* src,
 
 } // namespace
 
+PreparedStrictPatch::~PreparedStrictPatch() {
+    if (storage_ && !committed_) splice::os::free_executable_memory(storage_, kNearBlockSize);
+}
+bool PreparedStrictPatch::prepare(void* target, void* replacement,
+                                   const unsigned char* expected, std::size_t expected_size) {
+    if (storage_ || !target || !replacement || !expected || expected_size != 16 ||
+        (reinterpret_cast<std::uintptr_t>(target) & 7u) > 3u ||
+        std::memcmp(target, expected, 16) != 0) return false;
+    InstructionInfo instructions[5]{};
+    std::size_t source_size = 0;
+    std::size_t count = 0;
+    while (source_size < 5) {
+        const auto info = analyze_instruction(expected + source_size, 16 - source_size);
+        if (!info.length || (info.type != InstructionType::Regular &&
+                            info.type != InstructionType::RipRelative) ||
+            info.opcode == 0xff || info.opcode == 0xc3 || info.opcode == 0xc2 ||
+            info.opcode == 0xcb || info.opcode == 0xca ||
+            (info.opcode >= 0xe0 && info.opcode <= 0xe3)) return false;
+        instructions[count++] = info;
+        source_size += info.length;
+    }
+    auto* storage = static_cast<unsigned char*>(
+        splice::os::allocate_executable_memory(kNearBlockSize, target));
+    if (!storage) return false;
+    const auto fail = [&]() {
+        splice::os::free_executable_memory(storage, kNearBlockSize);
+        return false;
+    };
+    auto* relay = storage + kRelayOffset;
+    emit_jmp_abs64(relay, replacement);
+    void* destination = within_rel32(target, replacement) ? replacement : relay;
+    PreparedRel32Patch write{};
+    if (!prepare_atomic_jmp_rel32(target, destination, write)) return fail();
+    std::size_t source_offset = 0;
+    std::size_t relocated_offset = 0;
+    unsigned char sources[5]{}, relocated[5]{};
+    for (std::size_t i = 0; i < count; ++i) {
+        sources[i] = static_cast<unsigned char>(source_offset);
+        relocated[i] = static_cast<unsigned char>(relocated_offset);
+        const auto size = relocate_instruction(instructions[i], expected + source_offset,
+            static_cast<unsigned char*>(target) + source_offset,
+            storage + relocated_offset, storage + relocated_offset);
+        if (!size) return fail();
+        source_offset += instructions[i].length;
+        relocated_offset += size;
+    }
+    const auto tail = emit_jmp_abs64(storage + relocated_offset,
+        static_cast<unsigned char*>(target) + source_size);
+    splice::os::flush_instruction_cache(storage, relocated_offset + tail);
+    splice::os::flush_instruction_cache(relay, 14);
+    // Publish only a completely prepared object; cancellation owns the block.
+    target_ = target;
+    storage_ = storage;
+    write_ = write;
+    std::memcpy(expected_, expected, 16);
+    std::memcpy(source_offsets_, sources, 5);
+    std::memcpy(relocated_offsets_, relocated, 5);
+    boundary_count_ = count;
+    copy_size_ = source_size;
+    return true;
+}
+bool PreparedStrictPatch::map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept {
+    if (!storage_) return false;
+    const auto base = reinterpret_cast<std::uintptr_t>(target_);
+    if (ip < base || ip - base >= copy_size_) {
+        mapped = ip;
+        return true;
+    }
+    for (std::size_t i = 0; i < boundary_count_; ++i) {
+        if (ip - base == source_offsets_[i]) {
+            mapped = reinterpret_cast<std::uintptr_t>(storage_) + relocated_offsets_[i];
+            return true;
+        }
+    }
+    return false;
+}
+bool PreparedStrictPatch::commit_write() noexcept {
+    if (!storage_ || committed_ || std::memcmp(target_, expected_, 16) != 0) return false;
+    commit_atomic_jmp_rel32(write_);
+    committed_ = true;
+    return true;
+}
+
 void* install_inline_patch(void* target, void* new_func, void** original_func,
                            PrePatchFn on_trampoline_ready,
                            void* user_data,

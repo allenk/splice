@@ -16,9 +16,49 @@
 // ───────────────────────────────────────────────────────────────────────────
 #pragma once
 
+#include "atomic_patch.h"
+#include <cstddef>
+#include <cstdint>
+
 namespace splice::arch::x86_64 {
 
 using PrePatchFn = void (*)(void* trampoline, void* user_data);
+
+// Internal transaction building block, NOT a live-safe public hook API.
+// Preparation allocates/decodes/flushes but never changes target bytes or
+// permissions. Caller keeps the target alive and excludes other patch writers.
+// Before commit_write, caller must make the containing word writable, exclude
+// execution, migrate pending IPs and publish original(). Afterward caller must
+// flush the target instruction cache before resuming and restore permissions.
+// commit_write performs no allocation, OS calls, logging or callback. A stale
+// snapshot is refused; caller then rolls back any context/pointer publication
+// BEFORE destroying this object. Failure of that rollback requires retention.
+// Committed storage is process-lifetime, matching the existing hook ownership.
+class PreparedStrictPatch {
+public:
+    PreparedStrictPatch() = default;
+    ~PreparedStrictPatch();
+    PreparedStrictPatch(const PreparedStrictPatch&) = delete;
+    PreparedStrictPatch& operator=(const PreparedStrictPatch&) = delete;
+    bool prepare(void* target, void* replacement, const unsigned char* expected,
+                 std::size_t expected_size);
+    void* original() const noexcept { return storage_; }
+    std::size_t copy_size() const noexcept { return copy_size_; }
+    // False means invalid plan or interior non-boundary IP; output unchanged.
+    // IPs outside the displaced prefix are returned unchanged.
+    bool map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept;
+    bool commit_write() noexcept;
+private:
+    void* target_{};
+    void* storage_{};
+    PreparedRel32Patch write_{};
+    unsigned char expected_[16]{};
+    unsigned char source_offsets_[5]{};
+    unsigned char relocated_offsets_[5]{};
+    std::size_t boundary_count_{};
+    std::size_t copy_size_{};
+    bool committed_{};
+};
 
 // Install an inline patch at `target` that redirects to `new_func`.
 // `*original_func` is set to a trampoline that invokes the original

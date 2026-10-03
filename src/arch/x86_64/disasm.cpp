@@ -62,6 +62,10 @@ InstructionType classify(const nmd_x86_instruction& insn) {
     // Only applies in 64-bit mode. nmd sets `has_modrm` and we inspect modrm.
     if (insn.has_modrm &&
         insn.modrm.fields.mod == 0 && insn.modrm.fields.rm == 0b101) {
+        // The relocator supports only a trailing disp32. An immediate after
+        // it would be overwritten by the length-4 fixup. Refuse, do not emit
+        // a successful trampoline with a changed immediate/address.
+        if (insn.imm_mask != NMD_X86_IMM_NONE) return InstructionType::Unknown;
         return InstructionType::RipRelative;
     }
 
@@ -190,13 +194,8 @@ std::size_t relocate_instruction(const InstructionInfo& info,
             return 0;
 
         case InstructionType::RipRelative: {
-            // ModR/M + optional SIB + disp32. nmd tells us the length; the
-            // disp32 sits at `length - 4` (no immediate operand for loads;
-            // for instructions with both disp32 and immediate, this still
-            // holds because nmd reports length inclusive of everything).
-            // For Phase 3 we only handle loads/stores — instructions that
-            // have no immediate after the displacement. Same as ARM64 ADRP,
-            // a conservative check guards against misclassification.
+            // The classifier rejects forms with an immediate after disp32.
+            // For supported forms the displacement is the trailing field.
             const std::int64_t orig_target = old_addr + info.length + info.displacement;
             const std::int64_t new_disp = orig_target - (new_addr + info.length);
             if (new_disp < std::numeric_limits<std::int32_t>::min() ||
