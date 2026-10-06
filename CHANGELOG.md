@@ -6,15 +6,23 @@ All notable changes to Splice are documented here. Format follows
 
 ## [Unreleased]
 
-Everything below landed after `1.0.0` and went unrecorded until 2026-09-28.
-That gap is itself worth noting: `.observe()` is a **new public API**, and
-Splice treats the `splice::` surface as ABI-stable after Phase 1, so an
-unrecorded addition is exactly what this file is for.
+## [1.1.0] - 2026-10-06
 
-All of it came out of Splice's first consumer outside its own tests — the
-GpuThermalGuard game overlay, hooking `IDXGISwapChain::Present` in `dxgi.dll`.
-Known gaps that work surfaced and did **not** close are listed at the end of
-this section, under *Not fixed — recorded instead*.
+Splice's first release driven by a consumer outside its own tests:
+[GpuThermalGuard](https://github.com/allenk/GpuThermalGuard), whose in-game
+overlay hooks `IDXGISwapChain::Present` (D3D11) and the D3D12 present path
+inside running games. Installing into a process whose render thread is already
+executing the target is the hard case, and most of this release is what that
+required: near trampolines and relays so an x86_64 install is one atomic store,
+strict exact-site installation, prepared patches with instruction-boundary maps,
+and an enlisted-thread transaction for coordinating the threads that may be
+inside the bytes being replaced.
+
+`.observe()` is a **new public API**; Splice treats the `splice::` surface as
+ABI-stable after Phase 1, so it is a minor version. Everything else either keeps
+its contract or fails closed where it used to misbehave. Known gaps that this
+work surfaced and did **not** close are listed at the end of this section, under
+*Not fixed — recorded instead*.
 
 ### Added
 - Internal Windows x64 enlisted-thread transaction primitive with fixed caller
@@ -579,4 +587,6 @@ Known test-design issue (NOT a Splice library bug — filed as task):
 - Callback type is a template parameter, not `std::function`, so the
   fluent chain fully inlines (FR-010)
 
+[Unreleased]: https://github.com/allenk/splice/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/allenk/splice/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/allenk/splice/releases/tag/v1.0.0

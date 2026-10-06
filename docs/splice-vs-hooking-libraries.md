@@ -61,7 +61,7 @@ Columns ordered by closeness to Splice's use case.
 | **Pending hooks** (not-yet-loaded ELF) | ✖ (resolves at install) | ✅ | ✖ | ✖ | ✖ | ✖ |
 | **DLL/SO injection** | ✖ (in-process only) | ✖ (in-process) | ✅ | ✖ | ✖ | ✖ |
 | **License** | MIT | MIT | MIT (4.0.1+) | MIT | BSD-2-Clause | MIT |
-| **Maturity** | v1.0.0 (new) | **production at scale** | very mature (MS) | mature | mature, small | small/young |
+| **Maturity** | v1.1.0 (new) | **production at scale** | very mature (MS) | mature | mature, small | small/young |
 
 > ✅ first-class · ✖ not offered but achievable another way · ❌ not supported
 
@@ -282,7 +282,7 @@ generic formatting is hard without reflection).
   hardening.
 - **PolyHook2** offers more hook *types*.
 - **SubHook/rcmp** are smaller/simpler for plain x86/x64 inline hooks.
-- Splice is **v1.0.0 (new)** vs years of field use elsewhere.
+- Splice is **v1.1.0 (new)** vs years of field use elsewhere.
 
 **Rule of thumb:**
 - Android ARM, production, need unhook / register intercept → **ShadowHook**.

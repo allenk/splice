@@ -7,7 +7,7 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-**Status:** **v1.0.0** · productized from `the predecessor framework`, the framework behind a production Android game enhancer. Live-verified on Windows x86_64 and Snapdragon 8 Gen 3 ARM64.
+**Status:** **v1.1.0** · productized from `the predecessor framework`, the framework behind a production Android game enhancer. Live-verified on Windows x86_64 and Snapdragon 8 Gen 3 ARM64, and shipping inside running games on Windows in [GpuThermalGuard](https://github.com/allenk/GpuThermalGuard)'s in-game overlay.
 
 ---
 
@@ -121,6 +121,31 @@ wrong argument type to `orig`, or mismatch the callback, and it fails to
 build. The C-based libraries make you hand-write the signature and cast
 through `void*`, where the same mistake is silent runtime corruption.
 
+## Used by
+
+**[GpuThermalGuard](https://github.com/allenk/GpuThermalGuard)** — a power-limit
+guard for NVIDIA GPUs with an in-game overlay. Its overlay DLL uses Splice to
+hook the D3D11 and D3D12 present paths **inside games that are already
+running**, which is the hardest place to install a hook: the render thread may
+be executing the very bytes being replaced. Splice 1.1.0 is largely what that
+required — see [CHANGELOG](CHANGELOG.md#110---2026-10-06):
+
+- **One atomic store per x86_64 install.** The trampoline is allocated near the
+  target with a 14-byte relay beside it, so the live prologue only ever takes a
+  5-byte `E9 rel32` inside one aligned quadword — verified with the hook 28.7 GB
+  from `dxgi.dll`.
+- **Strict exact-site installation**, plus two internal building blocks a
+  live installer is made from: **prepared patches** with instruction-boundary
+  maps (everything decided before the target is touched; the write is a
+  separate step), and an **enlisted-thread transaction** (Windows x64) that
+  moves a thread caught inside the replaced bytes to the exact equivalent
+  instruction, with explicit recovery outcomes. They are not a public
+  live-install API: the caller must own the thread set and its suspension.
+- **`.observe()` / `invocations()`** — proof that calls actually reach a hook,
+  not only that an address is patched.
+
+Using Splice in a project? Open an issue or a PR to be listed here.
+
 ## Design values
 
 1. **Type safety first** — signatures deduced via `decltype`, no `void*` in user code.
@@ -156,8 +181,8 @@ true-uninstall + injection, PolyHook2 on hook-type variety.
 | Android ARM64 | ✅ Production | inline patch (live-verified, Snapdragon 8 Gen 3) |
 | Linux ARM64 | ✅ Supported | GOT/PLT + inline |
 | Linux x86_64 | ✅ Supported | GOT/PLT + inline |
-| Windows x86_64 | ✅ Supported | IAT + inline |
-| Android ARM32 | ⏸ Optional | v1.1 (FR-006) |
+| Windows x86_64 | ✅ Production | IAT + inline (in running games: [GpuThermalGuard](https://github.com/allenk/GpuThermalGuard)) |
+| Android ARM32 | ⏸ Optional | later (FR-006) |
 
 CI builds + tests Windows x64, Linux x64 (+ASan), Linux ARM64, and
 cross-compiles Android ARM64 on every push. On-device ARM64 verification is a
@@ -291,7 +316,14 @@ cmake/               spliceConfig.cmake.in (find_package support)
 - Fluent API v2 — `.before`/`.after`/`.when`/`.once`/`.times`, `SPLICE_HOOK_MEMBER`, diagnostics, `ScopedHook`.
 - Tiered `disable()`, `find_package(splice)` install/export.
 
-**Post-1.0 (optional):** Android ARM32 (FR-006); macOS is research-only (see [`docs/macos-port-notes.md`](docs/macos-port-notes.md)).
+**v1.1.0 — shipped (2026-10-06):** live installation into running processes, driven by GpuThermalGuard. Highlights:
+
+- Near trampolines + relay: atomic 5-byte x86_64 installs regardless of where the hook lives.
+- Strict exact-site installation; internal `PreparedStrictPatch` and enlisted-thread transaction (Windows x64).
+- ARM64 near allocation so `ADRP`/`B` prologues relocate; `.observe()` / `invocations()`.
+- Fail-closed fixes: refused stacking instead of recursion, Tier 1 made truly atomic, `splice_disable` restored on MSVC prologues.
+
+**Next (optional):** chaining onto patches installed by others; `ADR` materialisation on ARM64; Android ARM32 (FR-006); macOS is research-only (see [`docs/macos-port-notes.md`](docs/macos-port-notes.md)).
 
 ## License
 

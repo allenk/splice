@@ -17,7 +17,7 @@ if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 endif()
 
 project(splice
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "Cross-platform C++ function hooking library"
     LANGUAGES CXX)
 
