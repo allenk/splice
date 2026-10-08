@@ -107,6 +107,7 @@ std::size_t emit_prologue_copy(std::uint8_t* dst, const std::uint8_t* src,
 PreparedStrictPatch::~PreparedStrictPatch() {
     if (storage_ && !committed_) splice::os::free_executable_memory(storage_, kNearBlockSize);
 }
+
 bool PreparedStrictPatch::prepare(void* target, void* replacement,
                                    const unsigned char* expected, std::size_t expected_size) {
     if (storage_ || !target || !replacement || !expected || expected_size != 16 ||
@@ -165,6 +166,7 @@ bool PreparedStrictPatch::prepare(void* target, void* replacement,
     copy_size_ = source_size;
     return true;
 }
+
 bool PreparedStrictPatch::map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept {
     if (!storage_) return false;
     const auto base = reinterpret_cast<std::uintptr_t>(target_);
@@ -180,6 +182,7 @@ bool PreparedStrictPatch::map_ip(std::uintptr_t ip, std::uintptr_t& mapped) cons
     }
     return false;
 }
+
 bool PreparedStrictPatch::commit_write() noexcept {
     if (!storage_ || committed_ || std::memcmp(target_, expected_, 16) != 0) return false;
     commit_atomic_jmp_rel32(write_);

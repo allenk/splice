@@ -29,21 +29,25 @@ void* allocate_executable_memory(std::size_t size, const void*) {
     ++allocations;
     return trampoline_storage.data();
 }
+
 void free_executable_memory(void* memory, std::size_t) {
     EXPECT_EQ(memory, trampoline_storage.data());
     ++frees;
 }
+
 bool make_executable_writable(void* address, std::size_t size) {
     ++writable_requests;
     writable_size = size;
     writable_address = address;
     return allow_write;
 }
+
 void restore_executable(void* address, std::size_t size) {
     ++restore_requests;
     restored_address = address;
     restored_size = size;
 }
+
 void flush_instruction_cache(void*, std::size_t) {}
 std::size_t page_size() { return 4096; }
 }

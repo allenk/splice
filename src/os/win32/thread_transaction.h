@@ -14,10 +14,12 @@ inline constexpr std::size_t max_enlisted_threads = 4096;
 enum class TransactionOutcome { refused, installed, recovery_required };
 enum class TransactionStage { input, identity, suspend, context, boundary, migrate,
                               commit, rollback, flush, resume, complete };
+
 struct TransactionResult {
     TransactionOutcome outcome;
     TransactionStage stage;
 };
+
 struct ThreadSlot {
     HANDLE handle{};  // Borrowed, pre-opened; never closed here.
     DWORD id{};
@@ -28,6 +30,7 @@ struct ThreadSlot {
     bool suspended{};  // Our increment is still outstanding.
     bool context_attempted{};
 };
+
 struct NativeThreadOps {
     DWORD thread_id(HANDLE h) const noexcept { return GetThreadId(h); }
     DWORD process_id(HANDLE h) const noexcept { return GetProcessIdOfThread(h); }
@@ -55,7 +58,8 @@ template<class Ops = NativeThreadOps>
 TransactionResult commit_enlisted(arch::x86_64::PreparedStrictPatch& plan,
     std::span<ThreadSlot> slots, std::atomic<void*>& publication, Ops& ops) noexcept {
     static_assert(std::atomic<void*>::is_always_lock_free);
-    if (!plan.prepared() || slots.empty() || slots.size() > max_enlisted_threads || publication.load())
+    if (!plan.prepared() || slots.empty() || slots.size() > max_enlisted_threads ||
+        publication.load())
         return {TransactionOutcome::refused, TransactionStage::input};
     const auto self = ops.current_thread();
     const auto process = ops.current_process();
@@ -82,7 +86,10 @@ TransactionResult commit_enlisted(arch::x86_64::PreparedStrictPatch& plan,
             auto& slot = slots[i - 1];
             if (!slot.suspended) continue;
             slot.resume_result = ops.resume(slot.handle);
-            if (slot.resume_result == MAXDWORD) { ok = false; continue; }
+            if (slot.resume_result == MAXDWORD) {
+                ok = false;
+                continue;
+            }
             slot.suspended = false;  // Never decrement twice after a successful call.
             if (slot.resume_result != slot.prior_suspend + 1) ok = false;
         }

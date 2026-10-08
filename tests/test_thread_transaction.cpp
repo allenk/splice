@@ -15,6 +15,7 @@ struct FakeThread {
     bool fail_suspend{}, fail_get{}, fail_set{}, fail_rollback{}, fail_resume{};
     unsigned sets{}, resumes{};
 };
+
 struct FakeOps {
     bool fail_flush{};
     unsigned suspends{}, flushes{};
@@ -25,11 +26,13 @@ struct FakeOps {
     DWORD process_id(HANDLE h) { return thread(h).pid; }
     DWORD current_thread() { return 999; }
     DWORD current_process() { return 10; }
+
     DWORD suspend(HANDLE h) {
         ++suspends;
         auto& t = thread(h);
         return t.fail_suspend ? MAXDWORD : t.count++;
     }
+
     DWORD resume(HANDLE h) {
         auto& t = thread(h);
         ++t.resumes;
@@ -38,22 +41,32 @@ struct FakeOps {
         if (t.count) --t.count;
         return mismatched_resume ? before + 1 : before;
     }
+
     bool get(HANDLE h, CONTEXT& c) {
         auto& t = thread(h);
         if (t.fail_get) return false;
         c = t.context;
         return true;
     }
+
     bool set(HANDLE h, const CONTEXT& c) {
         auto& t = thread(h);
         ++t.sets;
         if (t.sets > 1 && t.fail_rollback) return false;
         t.context = c;  // Model even a failed call as potentially modifying IP.
-        if (mutate_on_set) { *mutate_on_set ^= 1; mutate_on_set = nullptr; }
+        if (mutate_on_set) {
+            *mutate_on_set ^= 1;
+            mutate_on_set = nullptr;
+        }
         return t.sets == 1 ? !t.fail_set : !t.fail_rollback;
     }
-    bool flush(void*) { ++flushes; return !fail_flush; }
+
+    bool flush(void*) {
+        ++flushes;
+        return !fail_flush;
+    }
 };
+
 class ThreadTransaction : public ::testing::Test {
 protected:
     unsigned char* block{};
