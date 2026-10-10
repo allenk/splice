@@ -15,11 +15,23 @@
 
 TEST(SmokeTest, umbrella_header_compiles) {
     // If this translation unit linked, <splice/splice.h> is self-contained.
-    // Assert the version constants are present and sane rather than pinning an
-    // exact value, so a version bump doesn't silently break the smoke test.
-    EXPECT_GE(splice::kVersionMajor, 1);
-    EXPECT_GE(splice::kVersionMinor, 0);
-    EXPECT_GE(splice::kVersionPatch, 0);
+    //
+    // The three constants are the library's own answer to "which splice is
+    // this?". The build system's answer reaches here by a different route: the
+    // top-level CMakeLists.txt parses the same header before project() and
+    // derives PROJECT_VERSION, which tests/CMakeLists.txt passes in as these
+    // macros. So the comparison is not a tautology -- it fails when the
+    // compiler and the parse read different headers, which is what a stale
+    // installed copy or a mixed include path produces.
+    //
+    // This assertion used to be EXPECT_GE(kVersionMinor, 0), relaxed so that a
+    // version bump could not break it. It could not fail for any version
+    // either, and in the four months it stood that way a release shipped
+    // headers reporting the previous version. An assertion no input can fail
+    // is not a detector.
+    EXPECT_EQ(splice::kVersionMajor, SPLICE_TEST_VERSION_MAJOR);
+    EXPECT_EQ(splice::kVersionMinor, SPLICE_TEST_VERSION_MINOR);
+    EXPECT_EQ(splice::kVersionPatch, SPLICE_TEST_VERSION_PATCH);
 }
 
 TEST(SmokeTest, log_macros_emit_without_crashing) {

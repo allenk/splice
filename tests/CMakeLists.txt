@@ -17,6 +17,16 @@ target_link_libraries(splice_smoke_test PRIVATE
     GTest::gtest_main
 )
 
+# The version the build system derived from include/splice/splice.h, handed to
+# the test so it can assert the compiled constants equal it. Passing the
+# numbers rather than letting the test read the header twice is the point: the
+# two values arrive by different routes and are compared.
+target_compile_definitions(splice_smoke_test PRIVATE
+    SPLICE_TEST_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    SPLICE_TEST_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    SPLICE_TEST_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
 # Unit tests (Phase 1 + 1.5 + 2 + 4.5d stress)
 # Task #57: stress_test.cpp used to live in its own binary because pre-RAII
 # installer queues left dangling lambdas across tests. With InstallerToken

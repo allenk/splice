@@ -16,10 +16,72 @@ if(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         CACHE STRING "Vcpkg toolchain file")
 endif()
 
+# ─── Version: the header is the single source of truth ───────────────────────
+#
+# Read before project(), so CMake derives PROJECT_VERSION from the same file a
+# consumer reads. The dependency runs this way round deliberately: include/ is
+# also consumed with no CMake in sight -- dropped into an AOSP tree and built
+# by Soong, or copied into a build with its own rules -- so a generated header
+# would be absent exactly where it matters most.
+#
+# It used to be two numbers maintained by hand. 1.1.0 was released with the
+# header still saying 1.0.0; because the exported package file takes its
+# version from PROJECT_VERSION, find_package(splice 1.1.0 CONFIG) succeeded and
+# the header then answered 1.0.0.
+set(SPLICE_VERSION_HEADER "${CMAKE_CURRENT_LIST_DIR}/include/splice/splice.h")
+file(READ "${SPLICE_VERSION_HEADER}" _splice_header_text)
+foreach(_part Major Minor Patch)
+    string(REGEX MATCH "kVersion${_part}[ ]*=[ ]*([0-9]+)"
+           _splice_match "${_splice_header_text}")
+    if(NOT _splice_match)
+        message(FATAL_ERROR
+            "splice: cannot read kVersion${_part} from ${SPLICE_VERSION_HEADER}."
+            " That header is the single source of the version, and CMake"
+            " derives PROJECT_VERSION from it.")
+    endif()
+    set(_splice_${_part} "${CMAKE_MATCH_1}")
+endforeach()
+set(SPLICE_VERSION "${_splice_Major}.${_splice_Minor}.${_splice_Patch}")
+unset(_splice_header_text)
+unset(_splice_match)
+
 project(splice
-    VERSION 1.1.0
+    VERSION ${SPLICE_VERSION}
     DESCRIPTION "Cross-platform C++ function hooking library"
     LANGUAGES CXX)
+
+# file(READ) is not a dependency, so without this an edit to the header alone
+# would not re-run cmake: the compiler would see the new constants while these
+# derived values stayed stale. That is not hypothetical -- it is how the test
+# below was red-proven, and it would otherwise be a way for the build to
+# disagree with the source without anyone touching CMakeLists.txt.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${SPLICE_VERSION_HEADER}"
+    "${CMAKE_CURRENT_LIST_DIR}/README.md")
+
+# The README's status line is the one remaining place the version is written
+# out, and it is prose rather than anything generated -- so it is asserted here
+# instead of derived. A tree whose README and header disagree does not
+# configure.
+set(_splice_readme "${CMAKE_CURRENT_LIST_DIR}/README.md")
+if(EXISTS "${_splice_readme}")
+    file(READ "${_splice_readme}" _splice_readme_text)
+    string(REGEX MATCH "Status:[^0-9]*([0-9]+[.][0-9]+[.][0-9]+)"
+           _splice_match "${_splice_readme_text}")
+    if(NOT _splice_match)
+        message(FATAL_ERROR
+            "splice: README.md carries no '**Status:** **vX.Y.Z**' line, so"
+            " there is nothing to check ${PROJECT_VERSION} against.")
+    elseif(NOT "${CMAKE_MATCH_1}" STREQUAL "${PROJECT_VERSION}")
+        message(FATAL_ERROR
+            "splice: README.md says v${CMAKE_MATCH_1} and"
+            " include/splice/splice.h says ${PROJECT_VERSION}. The header is"
+            " the single source of the version; correct the README.")
+    endif()
+    unset(_splice_readme_text)
+endif()
+unset(_splice_readme)
+unset(_splice_match)
 
 # ─── Standard ────────────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 20)
