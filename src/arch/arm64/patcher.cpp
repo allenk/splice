@@ -104,8 +104,8 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     //
     // ADR's ±1 MB is NOT delivered by this and cannot be: for a target inside a
     // large module the nearest free page lies past the module's own pages, which
-    // is no allocator's fault: the nearest free page can simply be further
-// away than the copied instruction can reach.
+    // is no allocator's fault: the nearest free page can simply be
+    // further away than the copied instruction can reach.
     //
     // A failed near-search is not fatal — allocate_executable_memory falls back
     // to an OS-chosen address, and the relocator then refuses only the prologues
