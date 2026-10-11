@@ -159,6 +159,42 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
                                          unsigned int expected_size,
                                          splice_patch_record* out_record);
 
+// ─── What a coordinated install would do, asked before doing it ───────────
+
+// Facts about the prologue an install would replace, decoded and not written.
+//
+// Why facts and not a verdict: a consumer's admission rule is the consumer's.
+// The shipping overlay refuses to patch its two hottest targets unless the
+// patch window is a single instruction, which is stricter than this library
+// requires, and it records these numbers as evidence when it refuses. A
+// boolean would serve the rule and not the evidence, and moving the rule in
+// here would move a product safety decision into the wrong repository.
+typedef struct {
+    // Bytes the patch would replace: whole instructions covering the patch
+    // length. Five, unless a prologue's first instruction is longer.
+    unsigned int patch_bytes;
+    // Length of the instruction at the entry.
+    unsigned int first_instruction;
+    // Instruction starts lying strictly inside the patch window. Zero means
+    // the window is exactly one instruction, so no thread can be *inside* the
+    // bytes being replaced -- it is either at the entry or past all of them.
+    unsigned int interior_boundaries;
+} splice_prologue_facts;
+
+// Fills `out` and returns 0 when the prologue at `target` decodes; returns -1
+// and leaves `out` untouched when it does not, when the architecture has no
+// decoder compiled, or when `target` does not name readable memory.
+//
+// Reads bytes and writes nothing. A jump thunk is followed first, as every
+// install path does, so the facts describe the function and not the thunk in
+// front of it.
+//
+// The patch length measured against is five bytes, which is what would
+// actually be written: a relay is allocated beside every target, so the
+// jump's destination is always within rel32 and the fourteen-byte absolute
+// form does not arise.
+int splice_prologue_profile(const void* target, splice_prologue_facts* out);
+
 // Resolve a library symbol to its address, and nothing else.
 //
 // The install entry points above resolve and patch in one call, which is all a

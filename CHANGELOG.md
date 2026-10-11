@@ -98,6 +98,23 @@ All notable changes to Splice are documented here. Format follows
   unresolvable symbol, an unavailable re-entrancy scope, or an installer
   registered with no group path), when there is nothing left to install, and for
   `splice::slot_swap`, which has no slot behind a queued hook to swap.
+- `splice_prologue_profile` on the C ABI, reporting what a coordinated
+  install would replace at a target: the patch window, the length of the
+  instruction at the entry, and how many instruction starts lie strictly
+  inside the window. Zero interior boundaries means no thread can be *inside*
+  the bytes being replaced -- it is either at the entry or past all of them.
+  It decodes and writes nothing, and follows a jump thunk first so the facts
+  describe the function rather than the thunk in front of it.
+  
+  Facts rather than a verdict, deliberately: a consumer's admission rule is
+  the consumer's. The shipping overlay refuses its two hottest targets unless
+  the window is a single instruction -- stricter than this library requires,
+  since the coordinated tier maps an interior program counter rather than
+  refusing it -- and it records these numbers as evidence when it refuses. A
+  boolean would serve the rule and not the evidence, and deciding it here
+  would move a product safety decision into the wrong repository. Until now
+  the only way to ask was to build a private arch type, which is why a
+  consumer was reaching across a submodule boundary into `src/`.
 - `.expect_prologue(bytes)` on a group site, and `SPLICE_LIVE_EXPECTED_BYTES`
   naming the length the C ABI had stated only in prose. The engine could
   always refuse a target whose first bytes are not the ones the caller read

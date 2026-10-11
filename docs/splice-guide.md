@@ -532,6 +532,8 @@ o.disable();                    // restore every slot, release the stubs
 
 splice_vtable_slot_of_pmf(bytes, size);    // C ABI: slot index, or -1
 splice_vtable_swap(slot, fn, &prev, &rec); // C ABI: one atomic pointer store
+splice_prologue_profile(target, &facts);   // C ABI: what a patch would replace
+splice_resolve_symbol(lib, symbol);        // C ABI: address, without installing
 ```
 
 `splice::State` is `installed` / `refused` / `recovered` / `lost`;

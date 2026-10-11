@@ -536,6 +536,57 @@ void* splice_hook_symbol_pre_rec(const char* lib_name,
     return hook_by_address(target, new_func, original_func, pre_cb, pre_user, out_record);
 }
 
+int splice_prologue_profile(const void* target, splice_prologue_facts* out) {
+    if (target == nullptr || out == nullptr) {
+        SPLICE_LOGE("splice_prologue_profile: null argument");
+        return -1;
+    }
+#if defined(SPLICE_HAS_X86_64_BACKEND)
+    using namespace splice::arch::x86_64;
+
+    void* const resolved = splice::engine::unwrap_jump_stub(const_cast<void*>(target));
+    if (resolved == nullptr) return -1;
+
+    // The decoder needs a full instruction's worth of readable bytes ahead of
+    // it, and the address came from a caller.
+    constexpr std::size_t kWalk = 64;
+    if (!splice::os::is_readable(resolved, kWalk)) {
+        SPLICE_LOGE("splice_prologue_profile: %p does not name readable memory", resolved);
+        return -1;
+    }
+
+    constexpr std::size_t kPlannedPatch = 5;
+    const std::size_t patch = calculate_copy_size(resolved, kPlannedPatch);
+    if (patch == 0) return -1;
+
+    const auto* bytes = static_cast<const std::uint8_t*>(resolved);
+    const auto first = analyze_instruction(bytes, kWalk);
+    if (first.length == 0 || first.type == InstructionType::Unknown) return -1;
+
+    // Walk the window and count the starts inside it. The entry is not an
+    // interior boundary and neither is the first byte past the window.
+    unsigned int interior = 0;
+    std::size_t offset = 0;
+    while (offset < patch) {
+        const auto info = analyze_instruction(bytes + offset, kWalk - offset);
+        if (info.length == 0 || info.type == InstructionType::Unknown) return -1;
+        offset += info.length;
+        if (offset < patch) ++interior;
+    }
+
+    out->patch_bytes = static_cast<unsigned int>(patch);
+    out->first_instruction = first.length;
+    out->interior_boundaries = interior;
+    SPLICE_LOGV("splice_prologue_profile: %p patch=%u first=%u interior=%u",
+                resolved, out->patch_bytes, out->first_instruction,
+                out->interior_boundaries);
+    return 0;
+#else
+    SPLICE_LOGW_ONCE("splice_prologue_profile: no prologue decoder on this architecture");
+    return -1;
+#endif
+}
+
 void* splice_resolve_symbol(const char* lib_name, const char* symbol_name) {
     if (lib_name == nullptr || lib_name[0] == '\0' || symbol_name == nullptr) {
         SPLICE_LOGE("splice_resolve_symbol: both a library and a symbol are required");
