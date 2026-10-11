@@ -33,14 +33,21 @@ All notable changes to Splice are documented here. Format follows
   part-way puts the sites already written back **before any thread resumes**,
   and reports `recovered`; `lost` means the threads are still suspended and is
   the one outcome a caller has to decide something about.
-  - **Not a documented feature yet, deliberately.** Two things it rests on are
-    unproved: that the thread set it suspends is complete -- a thread created
-    between the enumeration and the suspension is not in it -- and the behaviour
-    of a thread stopped *inside* the bytes being replaced, which needs a
-    controlled-boundary fixture that does not exist. `splice::slot_swap` is the
-    tier to use. `splice::live_tier_available()` reports whether the coordinated
-    tier can run on a build at all; it needs an architecture whose prologue can
-    be planned and an OS that can suspend a thread, which today means x86_64 on
+  - **A thread already inside the prologue is continued, not stepped over.**
+    Its program counter is mapped through that site's instruction-boundary map
+    to the relocated copy of the instruction it was at; a program counter that
+    is not at a boundary the decoder recognises is refused and nothing is
+    written. Both halves are driven deterministically, by parking a thread,
+    setting its program counter to each offset in turn, installing, and reading
+    back what the thread computes -- which says *where* it resumed rather than
+    merely that it survived.
+  - **The limit, stated rather than implied:** `splice::live` means splice
+    coordinated the threads it could enumerate. A thread created after the
+    enumeration is not in the set. It is not a stop-the-world, which needs
+    ptrace or root and remains a non-goal, and the tier is named `live` rather
+    than `safe` for that reason. `splice::live_tier_available()` reports whether
+    it can run on a build at all; it needs an architecture whose prologue can be
+    planned and an OS that can suspend a thread, which today means x86_64 on
     Windows.
   - `splice_live_prepare` / `splice_live_commit` / `splice_live_release` on the
     C ABI, split in three because of what may happen when: prepare does every

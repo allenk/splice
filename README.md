@@ -111,11 +111,15 @@ hand with the signature still checked.
 
 The second tier, `splice::live`, inline-patches the function the slot points at
 under one suspension of every other thread, so it survives another overlay
-swapping the same slot. It is built and tested, and it is **not a documented
-feature yet**: the completeness of the thread set it suspends is not proved, and
-the fixture for a thread stopped inside the bytes being replaced is not written.
-Use `splice::slot_swap`. `splice::live_tier_available()` reports whether the
-coordinated tier can run at all on a given build.
+swapping the same slot. A thread already executing the prologue is continued
+from the relocated copy of the instruction it was at; a program counter that is
+not at a recognised boundary is refused and nothing is written.
+
+Its limit, stated rather than implied: **it coordinates the threads it could
+enumerate.** A thread created after the enumeration is not in the set. It is not
+a stop-the-world — that needs ptrace or root and is a non-goal — which is why
+the tier is named `live` and not `safe`. `splice::live_tier_available()` reports
+whether it can run at all on a given build.
 
 **Hook a C++ member function — `this` becomes the first explicit arg:**
 

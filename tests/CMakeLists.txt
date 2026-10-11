@@ -57,6 +57,7 @@ add_executable(splice_unit_test
     live/test_vtable_slot.cpp
     live/test_vtable_portable.cpp
     live/test_live_tier.cpp
+    live/test_live_boundary.cpp
     stress_test.cpp
     helpers/test_targets.cpp
 )

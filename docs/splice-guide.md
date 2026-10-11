@@ -154,15 +154,27 @@ install unless the slot still holds the function you expected.
 | `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | only that vtable; another overlay swapping the same slot displaces you, or you displace it |
 | `splice::live` | inline patch of the function the slot points at | every other thread suspended once | survives other overlays' slot swaps, because every existing slot pointer stays valid |
 
-**`splice::slot_swap` is the tier to use today.** The coordinated tier is built
-and tested -- it suspends every other thread once, maps any program counter
-that sits inside the bytes being replaced, writes every site and resumes -- but
-one thing it rests on is not yet proved: that the thread set it suspends is
-complete. A thread created between the enumeration and the suspension is not in
-it. The fixture that settles the behaviour of a thread stopped *inside* the
-bytes being replaced is also not written yet. Until both exist, this tier is an
-opt-in for a caller who has read the two sentences above and accepted them, not
-a documented feature, and nothing in this guide tells you to reach for it.
+**What `splice::live` does, and the one thing it does not.** It suspends every
+other thread once, reads each one's program counter, and maps any that sits
+inside the bytes being replaced through that site's instruction-boundary map --
+so a thread already executing the prologue continues from the relocated copy of
+the instruction it was at. A program counter that is not at a boundary our
+decoding recognises is refused, and nothing is written. Then every site is
+written, flushed with its own length, and the threads resume in reverse order.
+A failure part-way puts back everything already written **before any thread
+resumes**.
+
+The limit, stated rather than implied: **`splice::live` means splice coordinated
+the threads it could enumerate.** A thread created after the enumeration is not
+in the set. This is not a stop-the-world -- that needs ptrace or root and is a
+documented non-goal -- and the tier is named `live` rather than `safe` for
+exactly that reason. It is still strictly better than the alternative, which is
+requiring the caller to guarantee that nothing is executing the target.
+
+Use `splice::slot_swap` when a slot swap is enough: it is one atomic store and
+coordinates nothing, so there is nothing to go wrong. Reach for `splice::live`
+when the slot is contested -- when something else may swap the same pointer and
+you need to be in the call chain regardless.
 
 `splice::live_tier_available()` says whether the tier can run at all on this
 build: it needs an architecture whose prologue can be planned and an OS that

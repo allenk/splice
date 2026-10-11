@@ -135,13 +135,21 @@ if (!overlay.ok()) { /* overlay.state()、overlay.failure() 說明發生了什�
 | `splice::slot_swap` | 一次 pointer 大小的 atomic store 寫進 vtable slot | 不需要 | 只有那張 vtable；另一個 overlay 換同一個 slot 會蓋掉你，或你蓋掉它 |
 | `splice::live` | inline patch slot 指向的那個函式 | 把其他每個執行緒暫停一次 | 不受其他 overlay 換 slot 影響，因為既有的 slot 指標全部仍然有效 |
 
-**今天該用的是 `splice::slot_swap`。** 協調 tier 已經實作並且有測試 —— 它把其他
-每個執行緒暫停一次，把落在被替換位元組範圍內的 program counter 映射過去，寫入
-每個 site，然後恢復 —— 但它依賴的一件事還沒有被證明：它暫停的那組執行緒是完整
-的。在列舉與暫停之間建立的執行緒不在裡面。另外，決定「停在被替換位元組**內部**
-的執行緒」行為的那個 fixture 也還沒寫。在這兩件事完成之前，這個 tier 是給讀完
-上面兩句並接受它們的呼叫者的 opt-in，不是一個有文件的功能，本文件也不會叫你
-去用它。
+**`splice::live` 做什麼，以及它不做的那一件事。** 它把其他每個執行緒暫停一次，
+讀出每一個的 program counter，把落在被替換位元組範圍內的那些，經過該 site 的
+instruction-boundary map 映射過去 —— 所以一個已經在執行 prologue 的執行緒，會從
+它當時所在那條指令的搬移版繼續。不在我們解碼認得的邊界上的 program counter 會
+被拒絕，而且什麼都不寫。然後每個 site 被寫入、用各自的長度 flush，執行緒反序
+恢復。中途失敗會在**任何執行緒被恢復之前**把已經寫入的全部放回去。
+
+明說而不是暗示的限制：**`splice::live` 的意思是 splice 協調了它能列舉到的那些
+執行緒。** 在列舉之後才建立的執行緒不在那組裡面。這不是 stop-the-world —— 那需要
+ptrace 或 root，而且是明文的 non-goal —— 這個 tier 叫 `live` 而不叫 `safe` 正是
+因為這個原因。它仍然嚴格優於另一個選項：要求呼叫端保證沒有任何東西正在執行目標。
+
+slot swap 夠用的時候就用 `splice::slot_swap`：它是一次 atomic store，不協調任何
+東西，所以沒有什麼可以出錯。當那個 slot 有競爭時才動用 `splice::live` —— 當別的
+東西可能換掉同一個指標，而你需要不管怎樣都在呼叫鏈裡的時候。
 
 `splice::live_tier_available()` 回答這個 build 上這個 tier 能不能跑：它需要一個
 prologue 可以規劃的架構，以及一個能暫停執行緒並移動其 program counter 的 OS，
