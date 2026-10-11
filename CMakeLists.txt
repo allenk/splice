@@ -234,11 +234,13 @@ if(SPLICE_HAS_ENGINE)
     if(SPLICE_HAS_POSIX_HOOK)
         list(APPEND _splice_sources
             src/os/posix/memory.cpp
+            src/os/posix/threads.cpp
             src/engine/got_patcher.cpp  # ELF-only
         )
     elseif(SPLICE_HAS_WIN32_OS)
         list(APPEND _splice_sources
             src/os/win32/memory.cpp
+            src/os/win32/threads.cpp
             src/engine/iat_patcher.cpp  # PE/COFF Tier-1 hook strategy
         )
     endif()

@@ -53,6 +53,7 @@ add_executable(splice_unit_test
     test_prologue_census.cpp
     test_hook_member.cpp
     test_reentrancy.cpp
+    test_os_threads.cpp
     stress_test.cpp
     helpers/test_targets.cpp
 )
