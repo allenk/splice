@@ -172,6 +172,88 @@ void restore_executable(void* addr, std::size_t size) {
     }
 }
 
+namespace {
+
+// Already writable? Then leave it alone. VirtualProtect would answer the
+// question too -- it hands back the previous protection -- but only by having
+// already changed it, and PAGE_READWRITE is not a faithful stand-in for
+// PAGE_WRITECOPY or for a page that also carried execute rights.
+bool writable_protection(DWORD protect) {
+    switch (protect & 0xFFu) {
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
+
+bool make_data_writable(void* addr, std::size_t size, DataProtection& saved) noexcept {
+    if (addr == nullptr || size == 0) return false;
+
+    MEMORY_BASIC_INFORMATION info{};
+    if (::VirtualQuery(addr, &info, sizeof(info)) != sizeof(info)) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): VirtualQuery failed, err=%lu",
+                    addr, size, ::GetLastError());
+        return false;
+    }
+    if (info.State != MEM_COMMIT) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): not committed memory (state=0x%lx)",
+                    addr, size, info.State);
+        return false;
+    }
+
+    // One query describes one region. A range crossing into the next region
+    // would need its protection restored piecewise, and a slot splice swaps
+    // never does -- so refuse rather than restore the wrong half.
+    const auto base = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+    const auto first = reinterpret_cast<std::uintptr_t>(addr);
+    if (first + size > base + info.RegionSize) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): range crosses a region boundary",
+                    addr, size);
+        return false;
+    }
+
+    if (writable_protection(info.Protect)) {
+        saved = DataProtection{};          // nothing changed, nothing to put back
+        return true;
+    }
+
+    const std::size_t ps = page_size();
+    const auto start = reinterpret_cast<void*>(page_start(addr, ps));
+    const auto span = pages_span(addr, size, ps);
+
+    DWORD old_protect = 0;
+    if (!::VirtualProtect(start, span, PAGE_READWRITE, &old_protect)) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): VirtualProtect RW failed, err=%lu",
+                    addr, size, ::GetLastError());
+        return false;
+    }
+    saved.previous = old_protect;
+    saved.changed = true;
+    return true;
+}
+
+void restore_data_protection(void* addr, std::size_t size,
+                             const DataProtection& saved) noexcept {
+    if (!saved.changed) return;
+
+    const std::size_t ps = page_size();
+    const auto start = reinterpret_cast<void*>(page_start(addr, ps));
+    const auto span = pages_span(addr, size, ps);
+
+    DWORD unused = 0;
+    if (!::VirtualProtect(start, span, static_cast<DWORD>(saved.previous), &unused)) {
+        SPLICE_LOGW("restore_data_protection(%p, %zu): VirtualProtect back to 0x%lx "
+                    "failed, err=%lu",
+                    addr, size, static_cast<DWORD>(saved.previous), ::GetLastError());
+    }
+}
+
 void flush_instruction_cache(void* addr, std::size_t size) {
     // x86 / x86_64 are cache-coherent for instruction streams, so this is a
     // no-op in practice. Windows' FlushInstructionCache is still the right

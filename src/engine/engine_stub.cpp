@@ -12,7 +12,21 @@
 
 #include <splice/log.h>
 
+#include "vtable_slot.h"
+
 extern "C" {
+
+// Resolving a pointer-to-member needs no OS layer and no arch backend -- it is
+// ABI arithmetic, or decoding a thunk the compiler emitted in this binary --
+// so it answers for real even on a platform splice cannot hook.
+int splice_vtable_slot_of_pmf(const void* pmf_bytes, unsigned int pmf_size) {
+    return splice::engine::slot_of_member_pointer(pmf_bytes, pmf_size);
+}
+
+int splice_vtable_swap(void**, void*, void**, splice_patch_record*) {
+    SPLICE_LOGW_ONCE("splice_vtable_swap: no backend compiled for this platform");
+    return -1;
+}
 
 void* splice_hook_address_strict_pre_rec(void*, void*, void**,
                                         splice_pre_patch_fn, void*,

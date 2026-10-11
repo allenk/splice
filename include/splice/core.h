@@ -15,6 +15,7 @@
 #pragma once
 
 #include <splice/engine.h>
+#include <splice/gates.h>
 #include <splice/log.h>
 #include <splice/policy.h>
 #include <splice/reentrancy.h>
@@ -353,16 +354,10 @@ private:
 
     // ─── FR-009 Step 9.2 — accumulated gates ──────────────────────────────
     // Cleared every time an action verb (onInvoke/before/after) commits, so
-    // subsequent action verbs at the same site start fresh.
-    struct PendingGates {
-        std::function<bool()>                   when_pred;
-        std::shared_ptr<std::atomic<long long>> remaining;   // shared with lambda
-        std::shared_ptr<std::atomic<std::uint64_t>> invocations;  // .observe()
-        std::uint64_t               reentry_bit = 0;          // .non_reentrant()
-        std::shared_ptr<Reentrancy> owned_scope;              // the no-argument form
-        bool                        reentry_requested = false;
-    };
-    PendingGates m_pending_gates;
+    // subsequent action verbs at the same site start fresh. What the gates
+    // mean, and the order they are consulted in, lives in <splice/gates.h> --
+    // one definition, shared with the group builder in <splice/live.h>.
+    detail::Gates m_pending_gates;
     // Kept on the entry, not only in the gates: commit_with_gates clears
     // m_pending_gates so the next action verb starts clean, and invocations()
     // has to keep working after that.
@@ -374,68 +369,26 @@ private:
     void commit_with_gates(InvokeFn fn) {
         // Snapshot the gates by value (shared_ptr is cheap) and reset
         // m_pending_gates so the next action verb starts clean.
-        PendingGates gates = std::move(m_pending_gates);
+        detail::Gates gates = std::move(m_pending_gates);
         m_pending_gates = {};
 
-        // Asked for a scope and none was available: commit nothing and refuse
-        // to install. Installing without the protection that was asked for is
-        // the double run, or the recursion, the caller was preventing.
-        m_refused = gates.reentry_requested && gates.reentry_bit == 0;
+        m_refused = gates.unsatisfiable();
         if (m_refused) {
             SPLICE_LOGE("non_reentrant: no re-entrancy scope available (64 in use); "
                         "this hook will not install (id=%d)", m_unique_id);
             return;
         }
 
-        if (!gates.when_pred && !gates.remaining && !gates.invocations &&
-            !gates.reentry_requested) {
+        if (gates.transparent()) {
             // Fast path — no gates, store the lambda as-is.
             HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
                 .set_invoke(std::move(fn));
             return;
         }
 
-        // Wrap with whatever gates are present. Both gate checks compile
-        // out as no-ops on unused branches because of the empty function /
-        // null shared_ptr checks at call time.
-        auto wrapped = [gates = std::move(gates), fn = std::move(fn)]
-                       (FuncType orig, Args... args) -> Ret {
-            // Before the gates: a call turned away by .when() still arrived,
-            // and "nothing arrived" is the finding this counter is for.
-            if (gates.invocations) {
-                gates.invocations->fetch_add(1, std::memory_order_relaxed);
-            }
-            // Ahead of .when() and the budget: a nested call is not a new call
-            // to decide about.
-            if (gates.reentry_bit != 0) {
-                if (detail::reentered(gates.reentry_bit)) {
-                    return orig(args...);
-                }
-                detail::ReentryHold hold(gates.reentry_bit);
-                return run_gated(gates, fn, orig, args...);
-            }
-            return run_gated(gates, fn, orig, args...);
-        };
-
         HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
-            .set_invoke(std::move(wrapped));
-    }
-
-    template <typename InvokeFn>
-    static Ret run_gated(const PendingGates& gates, const InvokeFn& fn,
-                         FuncType orig, Args... args) {
-        if (gates.when_pred && !gates.when_pred()) {
-            return orig(args...);
-        }
-        if (gates.remaining) {
-            // fetch_sub returns the value BEFORE decrement. Fire only
-            // while the budget is positive. The counter keeps ticking
-            // down past zero (harmless — bounded by call count).
-            if (gates.remaining->fetch_sub(1, std::memory_order_acq_rel) <= 0) {
-                return orig(args...);
-            }
-        }
-        return fn(orig, args...);
+            .set_invoke(detail::GateWrap<Ret, FuncType, Args...>::apply(
+                std::move(gates), std::move(fn)));
     }
 
     std::string m_lib;

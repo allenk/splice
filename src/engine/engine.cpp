@@ -22,6 +22,9 @@
 
 #include <splice/engine.h>
 
+#include "slot_patcher.h"
+#include "vtable_slot.h"
+
 #if defined(SPLICE_HAS_POSIX_HOOK)
 #   include "got_patcher.h"
 #endif
@@ -593,10 +596,63 @@ int splice_disable(const splice_patch_record* record) {
 #endif
         }
 
+        case SPLICE_PATCH_STRATEGY_DATA_SLOT: {
+            // Tier 1 on a slot whose page protection is nobody's business but
+            // the owner's -- a vtable, typically. Restoring is the same
+            // operation as installing, with the two pointers exchanged, so it
+            // goes through the same primitive rather than a reversed copy of it.
+            auto* slot = static_cast<void**>(record->hook_site);
+            if (slot == nullptr || record->pre_hook_pointer == nullptr) {
+                SPLICE_LOGE("splice_disable: invalid DATA_SLOT record (slot=%p, original=%p)",
+                            slot, record->pre_hook_pointer);
+                return -1;
+            }
+            if (!splice::engine::swap_pointer_slot(slot, record->pre_hook_pointer, nullptr)) {
+                SPLICE_LOGE("splice_disable: DATA_SLOT restore failed at %p",
+                            static_cast<void*>(slot));
+                return -1;
+            }
+            SPLICE_LOGI("Disabled (DATA_SLOT) at %p", static_cast<void*>(slot));
+            return 0;
+        }
+
         default:
             SPLICE_LOGE("splice_disable: unknown strategy %d", record->strategy);
             return -1;
     }
+}
+
+int splice_vtable_slot_of_pmf(const void* pmf_bytes, unsigned int pmf_size) {
+    return splice::engine::slot_of_member_pointer(pmf_bytes, pmf_size);
+}
+
+int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
+                       splice_patch_record* out_record) {
+    if (slot == nullptr || new_func == nullptr) {
+        SPLICE_LOGE("splice_vtable_swap: null slot or new_func");
+        return -1;
+    }
+
+    // Same lock as every other install and disable, and for the same reason
+    // given at the top of splice_disable: this makes a page writable, writes,
+    // and makes it read-only again, and page protection is not reference
+    // counted.
+    const std::lock_guard<std::mutex> installing(install_mutex());
+
+    void* previous = nullptr;
+    if (!splice::engine::swap_pointer_slot(slot, new_func, &previous)) {
+        return -1;
+    }
+    if (out_previous != nullptr) *out_previous = previous;
+    if (out_record != nullptr) {
+        *out_record = splice_patch_record{};
+        out_record->strategy = SPLICE_PATCH_STRATEGY_DATA_SLOT;
+        out_record->hook_site = static_cast<void*>(slot);
+        out_record->pre_hook_pointer = previous;
+    }
+    SPLICE_LOGI("Hooked via vtable slot %p: %p -> %p",
+                static_cast<void*>(slot), previous, new_func);
+    return 0;
 }
 
 void* splice_hook_address(void* target_addr, void* new_func, void** original_func) {

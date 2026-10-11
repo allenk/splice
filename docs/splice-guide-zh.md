@@ -55,7 +55,8 @@ splice::install_all();   // 一次 commit 所有 hook
 | 策略 | 何時用 | 安全性 |
 |---|---|---|
 | **POINTER_SWAP**（GOT/PLT on ELF, IAT on PE）| 透過 dynamic linker import 的函式 | Tier 1：**原子、可逆**、永久 disable |
-| **INLINE patch**（jmp rel32 on x86_64, indirect branch on ARM64）| 直接位址 / 本地函式 / vtable slot | Tier 2：**原子安裝**、**原子 disable**、trampoline 永久 leak |
+| **INLINE patch**（jmp rel32 on x86_64, indirect branch on ARM64）| 直接位址 / 本地函式 | Tier 2：**原子安裝**、**原子 disable**、trampoline 永久 leak |
+| **DATA_SLOT**（vtable slot） | `splice::Vtable` 的 `slot_swap` tier —— 見 §3.4b | Tier 1：atomic、可逆；頁面會還原成它原本的保護屬性，這是 vtable 需要而 GOT／IAT 不需要的 |
 
 引擎會先試 POINTER_SWAP，失敗才走 INLINE。
 
@@ -104,6 +105,61 @@ SPLICE_TIME(glTexImage2D);             // 累計時間，avg/min/max 查詢
 | `SPLICE_HOOK_ADDR(&funcname)` | 直接傳函式指標（vtable slot、RVA、JIT addr 都可）|
 
 每個都有 `_STATIC` 變體（保證 entry 永久存在 — 適合 `installAll()` 模式）和 `_AS` 變體（per-call-site 切換 policy，見 §6.2）。
+
+### 3.4b Hook 整個介面 — `splice::Vtable`
+
+COM 介面，或任何帶 virtual 函式的 C++ class，可以用方法名稱而不是位址來 hook。
+簽章從 pointer-to-member 推導，所以 callback 由編譯器檢查：
+
+```cpp
+#include <splice/live.h>
+
+splice::Outcome overlay = splice::Vtable<IDXGISwapChain3>{chain}
+    .on(&IDXGISwapChain3::Present,       present_cb)
+    .on(&IDXGISwapChain3::Present1,      present1_cb)
+    .on(&IDXGISwapChain3::ResizeBuffers) .when(enabled).before(note_resize)
+    .non_reentrant()                 // 整組共用一個 scope
+    .install(splice::slot_swap);     // 全成功或全不做
+
+if (!overlay.ok()) { /* overlay.state()、overlay.failure() 說明發生了什麼 */ }
+```
+
+§3.2 的每個 per-method 閘都適用 —— `.when()`、`.once()`、`.times(n)`、
+`.observe()`、`.non_reentrant()`，另外還有 `.expect(address)`：slot 裡不是你
+預期的那個函式就拒絕安裝。
+
+**兩個 tier，而且不能互相替代。**
+
+| Tier | 機制 | 需要協調嗎 | 影響範圍 |
+|---|---|---|---|
+| `splice::slot_swap` | 一次 pointer 大小的 atomic store 寫進 vtable slot | 不需要 | 只有那張 vtable；另一個 overlay 換同一個 slot 會蓋掉你，或你蓋掉它 |
+| `splice::live` | inline patch slot 指向的那個函式 | 需要執行協調 | 不受其他 overlay 換 slot 影響 |
+
+`install(splice::live)` **尚未實作，會拒絕**，並在 log 裡說明原因。它不會退回
+去做 slot swap：一個 tier 悄悄變成較弱的 tier，比直接說不要糟。
+
+**全成功或全不做。** 第五個方法安裝失敗時，已經寫入的四個會在 `install` 回傳前
+復原，結果是 `State::recovered` —— 什麼都沒發佈，可以安全重試。`State::refused`
+表示從頭到尾沒有寫入過。四個狀態是 `installed`、`refused`、`recovered`、`lost`；
+只有 `lost` 需要呼叫端處理。
+
+**Slot 解析，以及它什麼時候拒絕。** `&Interface::Method` 會依 C++ ABI 解析成
+slot index —— Itanium ABI 是算術，MSVC 是解碼編譯器產生的 dispatch thunk。遇到
+非 virtual 成員、需要調整 `this` 的繼承形狀、無法識別的 thunk、或還沒教過的
+架構，它會拒絕而不是猜。逃生門仍然保有型別安全：
+
+```cpp
+    .on_slot(8, &IDXGISwapChain3::Present, present_cb)   // 手填 index，簽章照樣檢查
+```
+
+**生命週期。** `outcome.disable()` 復原每個 slot 並歸還整組的 stub；
+`outcome.active()` 說 hook 現在是否還在，而 `outcome.state()` 永遠是這次安裝的
+判定。丟掉 `Outcome` **不會**卸載 —— hook 會留著，就像 `SPLICE_HOOK_STATIC` 的
+呼叫點一樣。
+
+**一個要先知道的限制。** 每個被 hook 的方法會從該簽章的 stub pool 取用一個，
+`SPLICE_SLOT_STUBS_PER_SIGNATURE` 預設 8。用完時整組會拒絕並說明；同一簽章需要
+同時存在更多 site 時調高這個 macro。
 
 ### 3.5 Disable 與生命週期
 

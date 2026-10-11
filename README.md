@@ -91,6 +91,27 @@ SPLICE_HOOK_ADDR(present_addr,  Present_t).non_reentrant(present_family).before(
 SPLICE_HOOK_ADDR(present1_addr, Present1_t).non_reentrant(present_family).before(draw_overlay1);
 ```
 
+**Hook a whole interface by method name — one transaction, all or nothing:**
+
+```cpp
+#include <splice/live.h>
+
+splice::Outcome overlay = splice::Vtable<IDXGISwapChain3>{chain}
+    .on(&IDXGISwapChain3::Present,  present_cb)     // signature deduced and checked
+    .on(&IDXGISwapChain3::Present1, present1_cb)
+    .non_reentrant()                                // one scope for the whole group
+    .install(splice::slot_swap);                    // every slot, or none of them
+
+if (!overlay.ok()) { /* overlay.state() and overlay.failure() say what happened */ }
+```
+
+Virtual methods are resolved to vtable slots per C++ ABI, and refuse rather than
+guess when they cannot be — `.on_slot(8, &I::Present, cb)` names the index by
+hand with the signature still checked. The second tier, `splice::live`, inline-
+patches the function the slot points at; it needs execution coordination that is
+not implemented yet, so `install(splice::live)` refuses instead of quietly doing
+a slot swap.
+
 **Hook a C++ member function — `this` becomes the first explicit arg:**
 
 ```cpp

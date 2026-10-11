@@ -7,6 +7,31 @@ All notable changes to Splice are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- `splice::Vtable<Interface>` in the new `<splice/live.h>`: hook several virtual
+  methods of a live object by name, in one all-or-nothing transaction, with the
+  signature deduced from the pointer-to-member and compile-checked. Every fluent
+  gate applies per method, plus `.expect(address)`; `.non_reentrant()` on the
+  group gives all its methods one scope, which is what methods that delegate to
+  each other need. A failure part-way restores the slots already written before
+  returning, reporting `State::recovered` with nothing published, and
+  `State::refused` when nothing was written at all.
+  - Slot resolution is per C++ ABI -- arithmetic on the Itanium ABI (including
+    the AArch64 variant, which marks virtuality in the this-adjustment rather
+    than the function pointer), and decoding the dispatch thunk under MSVC. It
+    refuses rather than guesses for a non-virtual member, an inheritance shape
+    needing `this` adjusted, an unrecognised thunk, or an architecture it has not
+    been taught. `.on_slot(index, pmf, callback)` names the index by hand with
+    the signature still checked.
+  - Two tiers, named: `splice::slot_swap` stores one pointer into the vtable slot
+    and needs no coordination; `splice::live` inline-patches the function behind
+    the slot and needs execution coordination that is not implemented yet, so
+    `install(splice::live)` **refuses** rather than quietly installing the weaker
+    tier.
+- `SPLICE_PATCH_STRATEGY_DATA_SLOT` and `splice_vtable_swap` /
+  `splice_vtable_slot_of_pmf` on the C ABI. A vtable slot differs from a GOT or
+  IAT slot in one way that matters: its page may be read-only, writable, or on
+  the heap, so this path records the protection it found and puts that back
+  instead of assuming read-only.
 - `.non_reentrant()` and `.non_reentrant(scope)`, a gate alongside `.when()`,
   `.once()` and `.times(n)`: while a callback runs on a thread, a nested call
   that reaches a hook of the same scope goes straight to the original. A

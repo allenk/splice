@@ -54,6 +54,8 @@ add_executable(splice_unit_test
     test_hook_member.cpp
     test_reentrancy.cpp
     test_os_threads.cpp
+    live/test_vtable_slot.cpp
+    live/test_vtable_portable.cpp
     stress_test.cpp
     helpers/test_targets.cpp
 )
@@ -69,6 +71,19 @@ target_include_directories(splice_unit_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/helpers
 )
+
+# The interface the vtable tests hook comes from a module the test binary did
+# not compile -- a shared library on every platform, not just Windows. That is
+# what makes its function table equivalent to the one a COM factory hands back:
+# read-only data, in somebody else's image.
+add_library(splice_vtable_provider SHARED helpers/vtable_provider.cpp)
+target_include_directories(splice_vtable_provider PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+target_link_libraries(splice_vtable_provider PRIVATE splice_warnings)
+set_target_properties(splice_vtable_provider PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+target_link_libraries(splice_unit_test PRIVATE splice_vtable_provider)
 
 # gtest_discover_tests runs the test binary on the host to enumerate cases.
 # Pointless (and broken) when cross-compiling for Android: the host would try

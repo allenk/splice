@@ -60,7 +60,8 @@ splice::install_all();   // one-shot commit of all queued hooks
 | Strategy | When it kicks in | Safety |
 |---|---|---|
 | **POINTER_SWAP** (GOT/PLT on ELF, IAT on PE) | Functions imported via the dynamic linker | Tier 1: **atomic, fully reversible**, permanent disable |
-| **INLINE patch** (jmp rel32 on x86_64, indirect branch on ARM64) | Direct addresses / local functions / vtable slots | Tier 2: atomic paths with implementation-dependent fallbacks; no execution-draining guarantee; trampoline memory retained |
+| **INLINE patch** (jmp rel32 on x86_64, indirect branch on ARM64) | Direct addresses / local functions | Tier 2: atomic paths with implementation-dependent fallbacks; no execution-draining guarantee; trampoline memory retained |
+| **DATA_SLOT** (a vtable slot) | `splice::Vtable` on the `slot_swap` tier — see §3.4b | Tier 1: atomic, reversible; the page is restored to the protection it had, which a vtable needs and a GOT or IAT does not |
 
 The engine tries POINTER_SWAP first, falls back to INLINE on failure.
 
@@ -123,12 +124,74 @@ Each form has a `_STATIC` variant (entry persists for program lifetime —
 the typical "installAll" pattern) and a `_AS` variant (per-call-site
 policy override, see §6.2).
 
+### 3.4b Hooking a whole interface — `splice::Vtable`
+
+A COM interface, or any C++ class with virtual functions, can be hooked by
+method name rather than by address. The signature comes from the
+pointer-to-member, so the callback is compile-checked:
+
+```cpp
+#include <splice/live.h>
+
+splice::Outcome overlay = splice::Vtable<IDXGISwapChain3>{chain}
+    .on(&IDXGISwapChain3::Present,       present_cb)
+    .on(&IDXGISwapChain3::Present1,      present1_cb)
+    .on(&IDXGISwapChain3::ResizeBuffers) .when(enabled).before(note_resize)
+    .non_reentrant()                 // one scope for the whole group
+    .install(splice::slot_swap);     // all or nothing
+
+if (!overlay.ok()) { /* overlay.state(), overlay.failure() say what happened */ }
+```
+
+Every per-method gate from §3.2 applies — `.when()`, `.once()`, `.times(n)`,
+`.observe()`, `.non_reentrant()`, plus `.expect(address)`, which refuses to
+install unless the slot still holds the function you expected.
+
+**Two tiers, and they are not interchangeable.**
+
+| Tier | Mechanism | Coordination | Reaches |
+|---|---|---|---|
+| `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | only that vtable; another overlay swapping the same slot displaces you, or you displace it |
+| `splice::live` | inline patch of the function the slot points at | needs execution coordination | survives other overlays' slot swaps |
+
+`install(splice::live)` is **not implemented yet and refuses**, with the reason
+in the log. It does not fall back to a slot swap: a tier that silently becomes
+a weaker tier is worse than one that says no.
+
+**All or nothing.** If the fifth method fails to install, the four already
+written are restored before `install` returns, and the result is
+`State::recovered` — safe to retry, with nothing published. `State::refused`
+means nothing was ever written. The four states are `installed`, `refused`,
+`recovered` and `lost`; only `lost` is the caller's problem.
+
+**Slot resolution, and when it refuses.** `&Interface::Method` is resolved to a
+slot index per C++ ABI — arithmetic on the Itanium ABI, decoding the
+compiler's dispatch thunk under MSVC. It refuses, rather than guessing, for a
+non-virtual member, an inheritance shape that needs `this` adjusted, an
+unrecognised thunk, or an architecture it has not been taught. The escape hatch
+keeps the type safety:
+
+```cpp
+    .on_slot(8, &IDXGISwapChain3::Present, present_cb)   // index by hand, signature still checked
+```
+
+**Lifecycle.** `outcome.disable()` restores every slot and releases the group's
+stubs; `outcome.active()` says whether the hooks are still in place, while
+`outcome.state()` stays the verdict on the install. Discarding the `Outcome`
+does **not** uninstall — the hooks stay, like a `SPLICE_HOOK_STATIC` call site.
+
+**One limit worth knowing up front.** Each hooked method claims one stub from a
+per-signature pool, `SPLICE_SLOT_STUBS_PER_SIGNATURE`, which defaults to 8. A
+group that runs out refuses and says so; raise the macro if you need more live
+sites of one signature at a time.
+
 ### 3.5 Disable and lifecycle
 
 | Operation | Behaviour |
 |---|---|
 | `entry.disable()` | Tier 1: atomic pointer restore; Tier 2: atomic prologue-bytes restore |
 | `entry.is_installed()` | Query whether the hook is still active |
+| `outcome.disable()` | A `splice::Vtable` group: every slot restored, stubs released |
 | **`splice::ScopedHook`** | RAII — automatic disable when the object destructs |
 | `splice::install_all()` | Run every queued installer (each `SPLICE_HOOK_STATIC` queues one) |
 
@@ -312,6 +375,31 @@ splice::register_global_installer([]{...});  // manually queue an installer
                                               // returns InstallerToken (RAII)
 ```
 
+### 6.3b Interface groups (`<splice/live.h>`)
+
+```cpp
+splice::Vtable<Interface> group{object};   // reads the object's function table
+group.on(pmf, callback)                    // invoke-shaped; returns the group
+group.on(pmf)                              // returns the site, for gates
+     .when(p).once().times(n).observe()
+     .non_reentrant([scope]).expect(addr)
+     .onInvoke(cb) | .before(cb) | .after(cb)   // returns the group
+group.on_slot(index, pmf [, callback])     // name the slot by hand
+group.non_reentrant([scope])               // one scope for every method
+splice::Outcome o = group.install(splice::slot_swap);   // or splice::live
+
+o.ok(); o.state(); o.failure(); o.installed_sites();
+o.active();                     // are the hooks in place NOW
+o.disable();                    // restore every slot, release the stubs
+
+splice_vtable_slot_of_pmf(bytes, size);    // C ABI: slot index, or -1
+splice_vtable_swap(slot, fn, &prev, &rec); // C ABI: one atomic pointer store
+```
+
+`splice::State` is `installed` / `refused` / `recovered` / `lost`;
+`splice::Failure` carries the site, stage, operation, thread id and OS error.
+See §3.4b.
+
 ### 6.4 RAII helpers
 
 ```cpp
@@ -331,6 +419,7 @@ splice::InstallerToken t = splice::register_global_installer(fn);
 | `SPLICE_DEFAULT_POLICY` | `::splice::policy::rcu_writeonce` | Default callback storage policy |
 | `SPLICE_REGISTRY_IMPL` | `::splice::registry::shared_mutex_map` | Registry implementation |
 | `SPLICE_MAX_HOOKS` | 512 | `rcu_atomic_array` snapshot bound |
+| `SPLICE_SLOT_STUBS_PER_SIGNATURE` | 8 | Live `splice::Vtable` sites per signature |
 | `SPLICE_RCU_GRACE_PERIOD_MS` | 100 | RCU snapshot reclamation grace period |
 | `SPLICE_LOG_TAG` | `"splice"` | Log tag string |
 | `SPLICE_BUILD_TESTS` | ON | Build unit tests |

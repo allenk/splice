@@ -6,7 +6,10 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include "proc_open.h"
+
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace splice::os {
@@ -141,6 +144,154 @@ void restore_executable(void* addr, std::size_t size) {
     if (::mprotect(reinterpret_cast<void*>(start), span, PROT_READ | PROT_EXEC) != 0) {
         SPLICE_LOGW("restore_executable(%p, %zu): mprotect failed errno=%d",
                     addr, size, errno);
+    }
+}
+
+namespace {
+
+// What /proc/self/maps says about the mapping that contains `addr`.
+//
+// There is no mprotect that reports the protection it replaced, and no POSIX
+// call that asks. Linux and Android answer through /proc/self/maps, so that is
+// where the answer comes from -- parsed in place, with no allocation and no
+// stdio, because the only caller that matters will eventually run inside an
+// install that must not touch the heap.
+//
+// Returns false when the mapping cannot be found or /proc is unreadable. A
+// caller that cannot learn the current protection must refuse rather than
+// guess: restoring PROT_READ onto a mapping that was writable is a way to
+// break a program that has nothing to do with hooking.
+struct Mapping {
+    std::uintptr_t begin = 0;
+    std::uintptr_t end   = 0;
+    int            prot  = 0;
+};
+
+bool parse_hex(const char*& p, const char* limit, std::uintptr_t& out) {
+    std::uintptr_t value = 0;
+    const char* start = p;
+    while (p < limit) {
+        const char c = *p;
+        int digit;
+        if (c >= '0' && c <= '9')      digit = c - '0';
+        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        else break;
+        value = (value << 4) | static_cast<std::uintptr_t>(digit);
+        ++p;
+    }
+    if (p == start) return false;
+    out = value;
+    return true;
+}
+
+// One line of /proc/self/maps: "7f3c1a000-7f3c1b000 r--p 00000000 ..."
+bool parse_maps_line(const char* line, const char* limit, Mapping& out) {
+    const char* p = line;
+    if (!parse_hex(p, limit, out.begin)) return false;
+    if (p >= limit || *p != '-') return false;
+    ++p;
+    if (!parse_hex(p, limit, out.end)) return false;
+    if (p >= limit || *p != ' ') return false;
+    ++p;
+    if (limit - p < 4) return false;
+    out.prot = 0;
+    if (p[0] == 'r') out.prot |= PROT_READ;
+    if (p[1] == 'w') out.prot |= PROT_WRITE;
+    if (p[2] == 'x') out.prot |= PROT_EXEC;
+    return true;
+}
+
+bool find_mapping(const void* addr, Mapping& out) {
+    const int fd = splice_os_open_readonly("/proc/self/maps");
+    if (fd < 0) {
+        SPLICE_LOGE("find_mapping(%p): cannot open /proc/self/maps, errno=%d", addr, errno);
+        return false;
+    }
+    const auto wanted = reinterpret_cast<std::uintptr_t>(addr);
+
+    // One line of /proc/self/maps is well under 512 bytes before the path; a
+    // long path is irrelevant here and is skipped with the rest of the line.
+    char buffer[4096];
+    std::size_t held = 0;          // bytes of a partial line kept at buffer[0]
+    bool found = false;
+    for (;;) {
+        const ssize_t got = ::read(fd, buffer + held, sizeof(buffer) - held);
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        const std::size_t available = held + static_cast<std::size_t>(got);
+        std::size_t consumed = 0;
+        for (std::size_t i = 0; i < available && !found; ++i) {
+            if (buffer[i] != '\n') continue;
+            Mapping m;
+            if (parse_maps_line(buffer + consumed, buffer + i, m) &&
+                wanted >= m.begin && wanted < m.end) {
+                out = m;
+                found = true;
+            }
+            consumed = i + 1;
+        }
+        if (found || got == 0) break;
+        held = available - consumed;
+        if (held >= sizeof(buffer)) {
+            // A single line longer than the whole buffer: a path we do not
+            // need. Drop it and resynchronise on the next newline.
+            held = 0;
+        } else if (consumed != 0) {
+            std::memmove(buffer, buffer + consumed, held);
+        }
+    }
+    ::close(fd);
+    if (!found) {
+        SPLICE_LOGE("find_mapping(%p): no mapping contains this address", addr);
+    }
+    return found;
+}
+
+} // namespace
+
+bool make_data_writable(void* addr, std::size_t size, DataProtection& saved) noexcept {
+    if (addr == nullptr || size == 0) return false;
+
+    Mapping mapping;
+    if (!find_mapping(addr, mapping)) return false;
+
+    const auto first = reinterpret_cast<std::uintptr_t>(addr);
+    if (first + size > mapping.end) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): range crosses a mapping boundary",
+                    addr, size);
+        return false;
+    }
+    if ((mapping.prot & PROT_WRITE) != 0) {
+        saved = DataProtection{};          // nothing changed, nothing to put back
+        return true;
+    }
+
+    const auto start = page_start(addr);
+    const auto span = pages_span(addr, size);
+    if (::mprotect(reinterpret_cast<void*>(start), span,
+                   mapping.prot | PROT_WRITE) != 0) {
+        SPLICE_LOGE("make_data_writable(%p, %zu): mprotect +w failed errno=%d (%s)",
+                    addr, size, errno, std::strerror(errno));
+        return false;
+    }
+    saved.previous = static_cast<std::uintptr_t>(mapping.prot);
+    saved.changed = true;
+    return true;
+}
+
+void restore_data_protection(void* addr, std::size_t size,
+                             const DataProtection& saved) noexcept {
+    if (!saved.changed) return;
+
+    const auto start = page_start(addr);
+    const auto span = pages_span(addr, size);
+    if (::mprotect(reinterpret_cast<void*>(start), span,
+                   static_cast<int>(saved.previous)) != 0) {
+        SPLICE_LOGW("restore_data_protection(%p, %zu): mprotect back to 0x%x failed errno=%d",
+                    addr, size, static_cast<unsigned>(saved.previous), errno);
     }
 }
 

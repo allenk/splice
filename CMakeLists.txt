@@ -227,13 +227,24 @@ list(APPEND _splice_sources
     src/arch/x86_64/disasm.cpp
 )
 
+# Resolving a pointer-to-virtual-member needs no OS layer and no arch backend:
+# it is C++ ABI arithmetic, or decoding a thunk this compiler emitted in this
+# binary. Always compiled, for the same reason the disassemblers are.
+list(APPEND _splice_sources
+    src/engine/vtable_slot.cpp
+)
+
 if(SPLICE_HAS_ENGINE)
-    list(APPEND _splice_sources src/engine/engine.cpp)
+    list(APPEND _splice_sources
+        src/engine/engine.cpp
+        src/engine/slot_patcher.cpp   # a pointer slot, with the page put back
+    )
 
     # OS layer — one of POSIX or Win32, never both.
     if(SPLICE_HAS_POSIX_HOOK)
         list(APPEND _splice_sources
             src/os/posix/memory.cpp
+            src/os/posix/proc_open.cpp  # owns <fcntl.h>; see its header
             src/os/posix/threads.cpp
             src/engine/got_patcher.cpp  # ELF-only
         )

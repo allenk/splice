@@ -94,7 +94,18 @@ void* splice_hook_symbol_pre(const char* lib_name,
 typedef enum {
     SPLICE_PATCH_STRATEGY_POINTER_SWAP = 0,   // GOT / IAT
     SPLICE_PATCH_STRATEGY_INLINE       = 1,   // direct prologue overwrite
+    SPLICE_PATCH_STRATEGY_DATA_SLOT    = 2,   // a pointer slot in data we do not own
 } splice_patch_strategy;
+
+// Why DATA_SLOT is not POINTER_SWAP, although both store one pointer:
+// POINTER_SWAP's slot lives in a GOT or an import table, on a page the loader
+// has already decided the protection of, and both patchers restore read-only
+// afterwards because for those pages that is the right answer. A vtable can be
+// in a module's read-only data, in ordinary writable data, or on the heap when
+// the object was built at run time. DATA_SLOT asks what the protection is and
+// puts that back, which is the only difference between them -- and the reason
+// the comment above this enum used to list "vtable slot" under POINTER_SWAP
+// and was wrong to.
 
 // Patch record — opaque to user code, but plain-old-data so it can be
 // stored and shipped by value. Populated by install, consumed by disable.
@@ -148,6 +159,45 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
                                          unsigned int expected_size,
                                          splice_patch_record* out_record);
 
+// ─── Vtable hooking (Tier 1 on an interface) ──────────────────────────────
+
+// The vtable slot index a pointer-to-virtual-member-function names, or -1 when
+// it cannot be resolved.
+//
+// `pmf_bytes` is the raw object representation of the pointer-to-member and
+// `pmf_size` its sizeof. Passing the bytes rather than the pointer is what
+// keeps this a C ABI: the shape of a pointer-to-member is a C++ ABI detail,
+// and which detail depends on the compiler, the architecture and the class's
+// inheritance -- so the decision lives on one side of this boundary and the
+// answer, an index, crosses it.
+//
+// Refuses (-1) for a non-virtual member, an inheritance shape needing a
+// this-adjustment, an unrecognised thunk, or an architecture whose ABI the
+// engine has not been taught. A refusal is not an error to retry; the caller
+// names the index by hand instead, with the signature still compile-checked.
+//
+// Pass only the bytes of a real pointer-to-member. Under the Microsoft ABI
+// those bytes ARE a code address and this function reads the instructions
+// there, because that is the only place the slot number exists; handing it an
+// arbitrary value reads arbitrary memory. The Itanium ABI side reads nothing
+// but the bytes given.
+int splice_vtable_slot_of_pmf(const void* pmf_bytes, unsigned int pmf_size);
+
+// Store `new_func` into `*slot`, reporting the previous value through
+// `out_previous` and filling `out_record` (either may be null) so the swap can
+// be reversed with splice_disable.
+//
+// The store is a single release store. The caller must publish everything a
+// hook needs -- the original function pointer and the callback -- BEFORE
+// calling, because a reader on another core can observe the new slot value as
+// soon as it lands. Publishing in the other order is a live call through a
+// null original.
+//
+// Returns 0 on success, -1 when the slot could not be made writable or the
+// arguments are unusable. On -1 nothing was written.
+int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
+                       splice_patch_record* out_record);
+
 // Disable a previously-installed hook described by `record`.
 // Returns:
 //    0 on success
@@ -161,6 +211,8 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
 // After successful return, the patch is reversed:
 //   - POINTER_SWAP: the slot holds `pre_hook_pointer` again, written with a
 //                   release store (see iat_patcher.cpp / got_patcher.cpp).
+//   - DATA_SLOT   : the same, through the protection-preserving path the
+//                   install used (see slot_patcher.cpp).
 //   - INLINE      : the prologue holds the original bytes again, restored with
 //                   one atomic access to the word containing the patch.
 //                   Trampoline memory remains allocated -- permanently, and by
