@@ -2,9 +2,12 @@
 //
 // Design section 8.1 asks for the live tier to be proved against real COM
 // before the overlay is asked again, and `IMalloc` is the first interface worth
-// pointing it at: a real system object with a real vtable in `ole32.dll`,
-// present on every Windows, with methods cheap enough to call millions of
-// times, and needing no device, no window and no message pump.
+// pointing it at: a real system object with a real vtable in a Microsoft
+// binary, present on every Windows, with methods cheap enough to call
+// millions of times, and needing no device, no window and no message pump.
+//
+// Which binary is a question this test answers rather than asks -- see the
+// resolver case below, where asserting the obvious name failed.
 //
 // It exercises the whole chain against something nobody here wrote -- pointer-
 // to-member to slot index under the Microsoft ABI, the group transaction, the
@@ -31,6 +34,8 @@
 #   include <objbase.h>
 #   include <psapi.h>
 
+#   include "pmf_slot.h"
+
 #   include <atomic>
 #   include <cstring>
 #   include <thread>
@@ -42,12 +47,7 @@ std::atomic<long long> g_alloc_calls{0};
 std::atomic<long long> g_free_calls{0};
 std::atomic<long long> g_getsize_calls{0};
 
-template <typename PMF>
-int slot_of(PMF pmf) {
-    unsigned char raw[sizeof(PMF)];
-    std::memcpy(raw, &pmf, sizeof(PMF));
-    return splice_vtable_slot_of_pmf(raw, static_cast<unsigned int>(sizeof(PMF)));
-}
+using splice::test::slot_of;
 
 // The COM apartment and the task allocator, for the whole suite. CoGetMalloc
 // hands back the same singleton every time, so its vtable is shared with
@@ -253,7 +253,7 @@ TEST_F(ComMalloc, threads_hammer_the_allocator_across_the_install) {
 // ─── what the coordinated tier makes of a Microsoft prologue ──────────────
 
 TEST_F(ComMalloc, the_live_tier_on_a_system_function_is_measured_not_assumed) {
-    // Whether ole32's allocator has a prologue this planner can relocate is a
+    // Whether the task allocator has a prologue this planner can relocate is a
     // property of a Microsoft binary, not of splice, and it is not something to
     // assert blind. So this case accepts both answers and pins the thing that
     // must hold either way: the interface still works afterwards, and a refusal
@@ -294,7 +294,7 @@ TEST_F(ComMalloc, the_live_tier_on_a_system_function_is_measured_not_assumed) {
     } else {
         // A refusal has to leave the allocator working. This is the assertion
         // that matters for a refusal on a system function: nothing was half
-        // written into ole32.
+        // written into a Microsoft binary.
         EXPECT_NE(live.state(), splice::State::lost);
         EXPECT_EQ(live.installed_sites(), 0u);
     }

@@ -24,10 +24,10 @@
 //
 //   splice::slot_swap  store a pointer into the vtable slot. Needs no thread
 //                      coordination -- it is one pointer-sized atomic write.
-//                      Reaches only that vtable, and another overlay swapping
-//                      the same slot displaces us or we displace it. There is
-//                      no slot to swap for a plain address, so a group named
-//                      that way refuses this tier.
+//                      Reaches that vtable, and another overlay swapping the
+//                      same slot displaces us or we displace it. There is no
+//                      slot to swap for a plain address, so a group named that
+//                      way refuses this tier.
 //   splice::live       inline-patch the function the slot points at. Survives
 //                      other overlays' slot swaps, because every existing slot
 //                      pointer stays valid and the call still arrives. Needs
@@ -35,6 +35,14 @@
 //                      other thread suspended once, any program counter inside
 //                      the bytes being replaced mapped through the trampoline,
 //                      all sites written, resume.
+//
+// Neither tier is scoped to an object, and `Vtable` takes one, so: a class has
+// one vtable shared by every instance, so a slot swap made through one object
+// is seen by all of them -- measured on two swap chains from one device, which
+// share a table pointer. The coordinated tier is wider again, patching the
+// function itself, so every table pointing at it and every direct caller
+// arrive at the callback. Compare identity in the callback when one object is
+// what you meant.
 //
 // What a group buys over N separate hooks, on either tier: the sites are
 // written together and undone together, so a failure at the fifth cannot leave
@@ -806,6 +814,10 @@ public:
     // Reads the object's function table. The object must be polymorphic and
     // must keep its table pointer first, which is what a COM interface and a
     // single-inheritance C++ interface both guarantee.
+    //
+    // The object names the table; it does not scope the hook to itself. That
+    // table belongs to the concrete class and is shared by every instance of
+    // it. See the tier note at the top of this file.
     explicit Vtable(T* object) {
         static_assert(std::is_polymorphic_v<T>,
                       "splice::Vtable needs a class with virtual functions");

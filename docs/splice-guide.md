@@ -151,8 +151,34 @@ install unless the slot still holds the function you expected.
 
 | Tier | Mechanism | Coordination | Reaches |
 |---|---|---|---|
-| `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | only that vtable; another overlay swapping the same slot displaces you, or you displace it |
-| `splice::live` | inline patch of the function the slot points at | every other thread suspended once | survives other overlays' slot swaps, because every existing slot pointer stays valid |
+| `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | that vtable -- which is **every object sharing it**, not just the one you passed; another overlay swapping the same slot displaces you, or you displace it |
+| `splice::live` | inline patch of the function the slot points at | every other thread suspended once | that function -- every vtable pointing at it, and direct callers too; survives other overlays' slot swaps, because every existing slot pointer stays valid |
+
+**Neither tier is scoped to an object, and the constructor takes one, so this
+is worth being plain about.** `splice::Vtable<T>{object}` reads the object's
+function table and works on the table. A C++ or COM class has one vtable per
+concrete class, shared by every instance, so a slot swap made through one
+object is observed by all of them. Measured on two DXGI swap chains created
+from the same device: one table pointer, and a hook installed through the first
+chain sees frames presented on the second.
+
+The coordinated tier is wider still, because it patches the function rather
+than any table: every interface pointer that resolves to that function arrives
+at your callback, as does any direct call to it from anywhere in the process.
+That width is the point when the slot is contested -- it is why the tier
+survives another overlay's swap -- but it is width, and a hook you believed was
+scoped to your own object is not.
+
+If you need one object only, compare identity in the callback and pass the rest
+through:
+
+```cpp
+.on(&IDXGISwapChain::Present, [mine](auto orig, IDXGISwapChain* self,
+                                     UINT sync, UINT flags) {
+    if (self == mine) { /* ... */ }
+    return orig(self, sync, flags);
+})
+```
 
 **What `splice::live` does, and the one thing it does not.** It suspends every
 other thread once, reads each one's program counter, and maps any that sits

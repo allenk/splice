@@ -25,6 +25,14 @@ All notable changes to Splice are documented here. Format follows
   - Two tiers, named: `splice::slot_swap` stores one pointer into the vtable slot
     and needs no coordination; `splice::live` inline-patches the function behind
     the slot, under one suspension of every other thread.
+  - **Neither tier is scoped to an object**, although the constructor takes one,
+    and the guide and the header now say so rather than leaving it to be
+    inferred. A concrete class has one vtable shared by every instance, so a
+    slot swap made through one object is seen by all of them; the coordinated
+    tier patches the function, so every table pointing at it and every direct
+    caller arrive at the callback. Measured on two DXGI swap chains created from
+    one device, which share a table pointer -- a process singleton like
+    `CoGetMalloc`'s allocator could not have told the difference.
 - The coordinated tier: `splice::live`, and `splice::Live` for a group named by
   address rather than through an interface. One transaction suspends every other
   thread once, maps any program counter that sits inside the bytes being

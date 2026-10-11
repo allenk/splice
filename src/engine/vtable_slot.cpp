@@ -32,9 +32,19 @@ constexpr int kMaxPlausibleSlot = 4096;
 //   48 8B 01  FF 60 d8         mov rax,[rcx]; jmp [rax+d8]         slots 1..15
 //   48 8B 01  FF A0 d32        mov rax,[rcx]; jmp [rax+d32]        slots 16+
 //
-// The disp8 form stops at 0x78 and the compiler switches to disp32 at 0x80,
-// which is exactly where a decoder that treated the byte as unsigned and never
-// tested the boundary would start reporting slot 16 as slot -16.
+// The disp8 form stops at 0x78 and the compiler switches to disp32 at 0x80.
+// Both forms are therefore load-bearing, and a decoder that handled only the
+// first would be blind to every slot from 16 up -- which, on a real interface,
+// is most of it: ID3D11Device has forty methods.
+//
+// The signed read of the disp8 byte below is defensive rather than necessary,
+// and that is measured, not assumed. Reading it as unsigned survives every
+// test in this project, because the compiler only ever emits that form for
+// 0x00 through 0x78 and those bytes carry the same value either way; the byte
+// that would differ is never emitted in this form at all. It stays signed
+// because the field IS signed in the encoding, and a decoder that happens to
+// be right only because of what its input never contains is a decoder waiting
+// for a hand-written thunk.
 //
 // In an incremental-linked build the thunk's address is an ILT entry -- a bare
 // `E9 rel32` -- so a bounded follow comes first. That follow deliberately does
@@ -86,7 +96,7 @@ int decode_ms_thunk(std::uintptr_t first_word) {
     if (code[0] == 0xFF && code[1] == 0x20) {
         displacement = 0;
     } else if (code[0] == 0xFF && code[1] == 0x60) {
-        displacement = static_cast<std::int8_t>(code[2]);   // signed: see above
+        displacement = static_cast<std::int8_t>(code[2]);   // signed field; see above
     } else if (code[0] == 0xFF && code[1] == 0xA0) {
         std::int32_t disp32 = 0;
         std::memcpy(&disp32, code + 2, sizeof(disp32));

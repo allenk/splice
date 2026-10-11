@@ -59,6 +59,7 @@ add_executable(splice_unit_test
     live/test_live_tier.cpp
     live/test_live_boundary.cpp
     live/test_live_com_headless.cpp
+    live/test_live_com_graphics.cpp
     live/test_live_contention.cpp
     stress_test.cpp
     helpers/test_targets.cpp
@@ -90,9 +91,13 @@ set_target_properties(splice_vtable_provider PROPERTIES
 target_link_libraries(splice_unit_test PRIVATE splice_vtable_provider)
 
 # The COM runner needs the task allocator and the module walk that proves its
-# vtable entries are in somebody else's image.
+# vtable entries are in somebody else's image. The graphics runner adds a
+# window and nothing else: D3D11, D3D12 and DXGI are reached through
+# GetProcAddress, not an import library, so this binary still starts on a
+# machine with no graphics stack at all instead of failing to load and taking
+# every unrelated test down with it.
 if(WIN32)
-    target_link_libraries(splice_unit_test PRIVATE ole32 psapi)
+    target_link_libraries(splice_unit_test PRIVATE ole32 psapi user32)
 endif()
 
 # gtest_discover_tests runs the test binary on the host to enumerate cases.

@@ -132,8 +132,30 @@ if (!overlay.ok()) { /* overlay.state()、overlay.failure() 說明發生了什�
 
 | Tier | 機制 | 需要協調嗎 | 影響範圍 |
 |---|---|---|---|
-| `splice::slot_swap` | 一次 pointer 大小的 atomic store 寫進 vtable slot | 不需要 | 只有那張 vtable；另一個 overlay 換同一個 slot 會蓋掉你，或你蓋掉它 |
-| `splice::live` | inline patch slot 指向的那個函式 | 把其他每個執行緒暫停一次 | 不受其他 overlay 換 slot 影響，因為既有的 slot 指標全部仍然有效 |
+| `splice::slot_swap` | 一次 pointer 大小的 atomic store 寫進 vtable slot | 不需要 | 那張 vtable —— 也就是**共用它的每一個物件**，不只是你傳進去的那一個；另一個 overlay 換同一個 slot 會蓋掉你，或你蓋掉它 |
+| `splice::live` | inline patch slot 指向的那個函式 | 把其他每個執行緒暫停一次 | 那個函式 —— 指向它的每一張 vtable，還有直接呼叫它的地方；不受其他 overlay 換 slot 影響，因為既有的 slot 指標全部仍然有效 |
+
+**兩個 tier 都不是以物件為範圍，而 constructor 收的正好是一個物件，所以這件事值得
+講白。** `splice::Vtable<T>{object}` 讀出該物件的函式表，然後作用在那張表上。一個
+C++ 或 COM class 的 concrete class 只有一張 vtable，由它的每一個 instance 共用，
+所以透過某一個物件換掉的 slot，其他物件全部都看得到。在同一個 device 建出來的兩條
+DXGI swap chain 上量過：table 指標是同一個，透過第一條 chain 裝的 hook 看得到第二
+條 chain 上 present 的 frame。
+
+協調 tier 的範圍更寬，因為它 patch 的是函式本身而不是任何一張表：每一個解析到那個
+函式的 interface 指標都會抵達你的 callback，整個 process 裡任何一處直接呼叫也一樣。
+這個寬度在 slot 被搶的時候正是重點 —— 它就是這個 tier 能撐過別人換 slot 的原因 ——
+但它確實是寬度，而一個你以為只影響自己物件的 hook 並不是那樣。
+
+如果你只要一個物件，在 callback 裡比對 identity，其餘原樣放過去：
+
+```cpp
+.on(&IDXGISwapChain::Present, [mine](auto orig, IDXGISwapChain* self,
+                                     UINT sync, UINT flags) {
+    if (self == mine) { /* ... */ }
+    return orig(self, sync, flags);
+})
+```
 
 **`splice::live` 做什麼，以及它不做的那一件事。** 它把其他每個執行緒暫停一次，
 讀出每一個的 program counter，把落在被替換位元組範圍內的那些，經過該 site 的
