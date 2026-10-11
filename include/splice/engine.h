@@ -323,6 +323,13 @@ typedef struct {
     int          operation;   // splice_live_operation
     unsigned int thread_id;   // on whom; 0 when not thread-specific
     unsigned int os_error;    // GetLastError()/errno at the failure point
+    // How many threads the group enlisted, once it got as far as enumerating
+    // them; zero before that. Reported because it is evidence a caller cannot
+    // obtain any other way and may need afterwards: "the attach refused and
+    // there were a hundred and forty-three threads" is a different situation
+    // from the same refusal with four, and the engine is the only thing that
+    // counted.
+    unsigned int threads;
 } splice_live_outcome;
 
 // Plan every site. Allocates trampolines, snapshots prologues, builds the

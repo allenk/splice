@@ -323,6 +323,13 @@ public:
         return m_group ? m_group->sites.size() : 0;
     }
 
+    // How many threads the transaction enlisted. Reported whatever the
+    // outcome, because it is evidence a caller cannot obtain any other way and
+    // the same refusal means something different with a hundred and forty
+    // threads than with four. Zero when the attempt never got as far as
+    // enumerating them, and on the slot_swap tier, which enlists none.
+    [[nodiscard]] std::uint32_t threads() const noexcept { return m_threads; }
+
     // Whether the hooks are in place NOW, which is a different question from
     // what the attempt returned: state() is the verdict on the install and
     // never changes, active() goes false when disable() succeeds. The same
@@ -365,6 +372,7 @@ private:
 
     State                               m_state = State::refused;
     Failure                             m_failure{};
+    std::uint32_t                       m_threads = 0;
     std::shared_ptr<detail::GroupState> m_group;
 };
 
@@ -651,6 +659,7 @@ public:
         std::vector<splice_patch_record> records(m_sites.size());
         splice_live_commit(handle, records.data(), &engine_outcome);
         splice_live_release(handle);
+        m_threads = engine_outcome.threads;
 
         if (engine_outcome.state != SPLICE_LIVE_INSTALLED) {
             record_engine_failure(engine_outcome);
@@ -658,12 +667,16 @@ public:
                 // The stubs stay claimed: a thread may still be inside one,
                 // and on this path the threads may still be suspended.
                 m_sites.clear();
-                return Outcome(State::lost, m_failure);
+                Outcome lost_outcome(State::lost, m_failure);
+                lost_outcome.m_threads = m_threads;
+                return lost_outcome;
             }
             release_pending();
-            return Outcome(engine_outcome.state == SPLICE_LIVE_RECOVERED
+            Outcome undone(engine_outcome.state == SPLICE_LIVE_RECOVERED
                                ? State::recovered : State::refused,
                            m_failure);
+            undone.m_threads = m_threads;
+            return undone;
         }
 
         auto group = std::make_shared<detail::GroupState>();
@@ -799,7 +812,9 @@ protected:
 
     [[nodiscard]] Outcome refusal() {
         release_pending();
-        return Outcome(State::refused, m_failure);
+        Outcome outcome(State::refused, m_failure);
+        outcome.m_threads = m_threads;
+        return outcome;
     }
 
 private:
@@ -841,6 +856,7 @@ private:
     Outcome installed(std::shared_ptr<detail::GroupState> group) {
         group->installed = true;
         Outcome outcome(State::installed, Failure{});
+        outcome.m_threads = m_threads;
         outcome.m_group = std::move(group);
         SPLICE_LOGI("splice: %zu site(s) installed", m_sites.size());
         m_sites.clear();
@@ -890,6 +906,7 @@ private:
         fail(stage_of(outcome), operation_of(outcome), outcome.os_error,
              site_of(outcome));
         m_failure.thread_id = outcome.thread_id;
+        m_threads = outcome.threads;
     }
 
     static Stage stage_of(const splice_live_outcome& outcome) noexcept {
@@ -932,7 +949,8 @@ private:
     bool                             m_failed = false;
 
 protected:
-    Failure m_failure{};
+    Failure       m_failure{};
+    std::uint32_t m_threads = 0;
 };
 
 // ─── a group named through an interface ───────────────────────────────────

@@ -37,7 +37,7 @@ std::mutex& install_mutex();
 namespace {
 
 void fill_outcome(splice_live_outcome* out, LiveState state,
-                  const LiveFailure& failure) noexcept {
+                  const LiveFailure& failure, unsigned int threads = 0) noexcept {
     if (out == nullptr) return;
     out->state = static_cast<int>(state);
     out->site = static_cast<unsigned int>(failure.site);
@@ -45,6 +45,7 @@ void fill_outcome(splice_live_outcome* out, LiveState state,
     out->operation = static_cast<int>(failure.operation);
     out->thread_id = failure.thread_id;
     out->os_error = failure.os_error;
+    out->threads = threads;
 }
 
 #if defined(SPLICE_HAS_X86_64_BACKEND)
@@ -268,7 +269,8 @@ void splice_live_commit(void* handle, splice_patch_record* records_out,
                     static_cast<int>(result.failure.operation),
                     result.failure.thread_id, result.failure.os_error);
     }
-    fill_outcome(out, result.state, result.failure);
+    fill_outcome(out, result.state, result.failure,
+                 static_cast<unsigned int>(group->threads.size()));
 }
 
 void splice_live_release(void* handle) {

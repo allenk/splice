@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <thread>
 
 namespace {
 
@@ -90,6 +91,11 @@ protected:
 } // namespace
 
 TEST_F(ReplaceWith, two_sites_with_the_callers_own_replacements) {
+    // A worker of our own, so the enlisted-thread count below is asserting
+    // against something this test put there.
+    std::atomic<int> stop{0};
+    std::thread worker([&] { while (stop.load(std::memory_order_relaxed) == 0) std::this_thread::yield(); });
+
     splice::Live<> group;
     outcome = group
         .at(reinterpret_cast<void*>(&batch_target_a), TargetFn{})
@@ -115,10 +121,23 @@ TEST_F(ReplaceWith, two_sites_with_the_callers_own_replacements) {
     EXPECT_EQ(g_calls_a.load(), 1);
     EXPECT_EQ(g_calls_b.load(), 1);
 
+    // How many threads were frozen for this. Reported whatever the outcome,
+    // because the consumer's diagnostics quote it when an attach refuses: the
+    // same refusal with a hundred and forty threads is a different situation
+    // from the same refusal with four, and the engine is the only thing that
+    // counted them. A worker is held alive above precisely so this is not
+    // asserting against whatever threads happen to exist.
+    EXPECT_GE(outcome.threads(), 1u)
+        << "the transaction enlisted nobody, with a worker running";
+    SPLICE_LOGI("ReplaceWith: %u thread(s) enlisted", outcome.threads());
+
     ASSERT_TRUE(outcome.disable());
     const int settled_a = g_calls_a.load();
     EXPECT_EQ(batch_target_a(kArg), kPlainA);
     EXPECT_EQ(g_calls_a.load(), settled_a) << "the replacement still ran after disable";
+
+    stop.store(1, std::memory_order_release);
+    worker.join();
 }
 
 TEST_F(ReplaceWith, the_published_original_is_the_function_and_not_the_thunk) {
