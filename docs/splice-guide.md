@@ -144,8 +144,18 @@ if (!overlay.ok()) { /* overlay.state(), overlay.failure() say what happened */ 
 ```
 
 Every per-method gate from §3.2 applies — `.when()`, `.once()`, `.times(n)`,
-`.observe()`, `.non_reentrant()`, plus `.expect(address)`, which refuses to
-install unless the slot still holds the function you expected.
+`.observe()`, `.non_reentrant()`, plus two guards against arriving second:
+
+- `.expect(address)` refuses to install unless the **slot** still holds the
+  function you expected. For the `slot_swap` tier, where the slot is what
+  you write.
+- `.expect_prologue(bytes)` refuses unless the **target** still begins with
+  the sixteen bytes you read. For the coordinated tier, which patches the
+  function rather than the table — there the slot can be pristine while
+  the code behind it has already been replaced, so this is the only check
+  that notices. The parameter is a reference to `const unsigned char[16]`,
+  not a pointer, because the engine reads that many bytes. A site that does
+  not ask is not checked.
 
 **Two tiers, and they are not interchangeable.**
 
@@ -512,6 +522,7 @@ splice::Outcome o = group.install(splice::slot_swap);   // or splice::live
 
 splice::Live<> addressed;                  // the same group, named by address
 addressed.at(target, FuncType{} [, callback])
+addressed.at(target, FuncType{}).expect_prologue(sixteen).onInvoke(cb)
 splice::Outcome o = splice::install_all(splice::live);  // the queue, as one group
 splice::live_tier_available()              // can the coordinated tier run here
 

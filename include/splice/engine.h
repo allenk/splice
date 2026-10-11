@@ -225,6 +225,10 @@ int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
 // every thread, N thread enumerations at about 118 ms each, and no way back if
 // the fifth of seven fails. One transaction writes all of them or none.
 
+// How many bytes `splice_live_site::expected` must point at. Fixed by the
+// engine's patch window; a shorter buffer is read past.
+#define SPLICE_LIVE_EXPECTED_BYTES 16u
+
 typedef struct {
     void* target;        // the function whose prologue is replaced
     void* replacement;   // where it should jump: the caller's stub

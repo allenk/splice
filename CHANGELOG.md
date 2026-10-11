@@ -98,6 +98,17 @@ All notable changes to Splice are documented here. Format follows
   unresolvable symbol, an unavailable re-entrancy scope, or an installer
   registered with no group path), when there is nothing left to install, and for
   `splice::slot_swap`, which has no slot behind a queued hook to swap.
+- `.expect_prologue(bytes)` on a group site, and `SPLICE_LIVE_EXPECTED_BYTES`
+  naming the length the C ABI had stated only in prose. The engine could
+  always refuse a target whose first bytes are not the ones the caller read
+  -- it is the only check that notices somebody else has already patched the
+  function, because the coordinated tier patches the function and not the
+  table, so a vtable slot can be pristine while the code behind it is not.
+  The fluent layer could not reach it: `install(splice::live)` passed a null
+  expectation for every site. Found by the first consumer build after the
+  redesign, whose product install path carries a sixteen-byte snapshot per
+  site and relies on exactly that refusal. A site that does not ask is not
+  checked, which is what every group written before this gets.
 - `splice_resolve_symbol` on the C ABI: resolve a library symbol to its address,
   and nothing else. The install entry points resolve and patch in one call,
   which is all a single hook ever needed; a group has to know every target

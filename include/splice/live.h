@@ -275,6 +275,11 @@ struct PendingSite {
     void*  expected      = nullptr;   // .expect(addr): refuse unless this is there
     bool   expect_set    = false;
 
+    // .expect_prologue(bytes): refuse unless the TARGET begins with these.
+    // Borrowed, not copied -- the caller owns the bytes and the group does not
+    // outlive the install, which is the same contract the C ABI states.
+    const unsigned char* expected_prologue = nullptr;
+
     // Keeps the site's signature and callback alive without the group having
     // to know either. `group_bit` is the re-entrancy scope the whole group
     // shares, applied unless this site named one of its own.
@@ -420,6 +425,25 @@ public:
         return *this;
     }
 
+    // Refuse to install unless the target's first bytes are these.
+    //
+    // Distinct from `expect(address)`, and the distinction is the point:
+    // that one asks whether a vtable slot still holds the pointer you read,
+    // and this one asks whether the FUNCTION still begins the way you saw it.
+    // On the coordinated tier, which patches the function and not the table,
+    // this is the only check that can notice somebody else has already
+    // patched it -- a slot can be pristine while the code behind it is not.
+    //
+    // The parameter is a reference to an array of exactly the engine's patch
+    // window, not a pointer: the engine reads that many bytes, so a shorter
+    // buffer would be read past, and a pointer parameter would let a caller
+    // pass one by accident.
+    GroupSite& expect_prologue(
+        const unsigned char (&bytes)[SPLICE_LIVE_EXPECTED_BYTES]) {
+        m_expected_prologue = bytes;
+        return *this;
+    }
+
     // The counter .observe() installed, so the caller can read it after the
     // chain has moved on. Null when this site was never told to observe.
     [[nodiscard]] std::shared_ptr<std::atomic<std::uint64_t>> counter() const {
@@ -439,7 +463,7 @@ private:
     Owner& commit(typename Binder::Invoke fn) {
         m_owner.template add_pending<FuncType>(
             m_slot_index, m_slot, m_target, std::move(m_gates),
-            std::move(fn), m_expected, m_expect_set);
+            std::move(fn), m_expected, m_expect_set, m_expected_prologue);
         return m_owner;
     }
 
@@ -450,6 +474,7 @@ private:
     detail::Gates m_gates;
     void*         m_expected = nullptr;
     bool          m_expect_set = false;
+    const unsigned char* m_expected_prologue = nullptr;
     std::shared_ptr<std::atomic<std::uint64_t>> m_invocations;
 };
 
@@ -559,7 +584,10 @@ public:
             pending.target = target;
             sites[i].target = target;
             sites[i].replacement = pending.stub;
-            sites[i].expected = nullptr;
+            // The engine's own prologue check, which the fluent layer had no
+            // way to reach until a consumer needed it. Null means "do not
+            // check", which is what every site that did not ask for it gets.
+            sites[i].expected = pending.expected_prologue;
         }
 
         std::vector<void*> originals(m_sites.size(), nullptr);
@@ -645,7 +673,8 @@ public:
     // nothing else should call it.
     template <typename FuncType, typename Fn>
     void add_pending(int slot_index, void** slot, void* target,
-                     detail::Gates gates, Fn fn, void* expected, bool expect_set) {
+                     detail::Gates gates, Fn fn, void* expected, bool expect_set,
+                     const unsigned char* expected_prologue = nullptr) {
         using Binder = detail::SiteBinder<FuncType, Policy>;
         const Site site{m_sites.size(), slot_index};
 
@@ -682,6 +711,7 @@ public:
         pending.registry_slot = default_context().slot_for(stub);
         pending.expected = expected;
         pending.expect_set = expect_set;
+        pending.expected_prologue = expected_prologue;
         pending.release_stub = [stub]() {
             detail::StubPool<FuncType, Policy>::release(stub);
         };

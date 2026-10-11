@@ -209,6 +209,16 @@ if (!all.ok()) { /* all.state(), all.failure() */ }
 就是兩個都叫 —— 而 entry 之所以被告知，正是為了讓第二次呼叫回報失敗，而不是去
 還原一段已經是原狀的位元組。
 
+兩個「後到」的防護，用在不同的地方：
+
+- `.expect(address)` 在 **slot** 還持有你預期的那個函式時才安裝。用於
+  `slot_swap` tier —— 那裡你寫的就是 slot。
+- `.expect_prologue(bytes)` 在 **目標函式**還是以你讀到的那 16 個 byte 開頭
+  時才安裝。用於協調 tier —— 它 patch 的是函式而不是表，所以 slot 可以
+  是乾淨的而背後的程式碼已經被換掉了，這是唯一會注意到的檢查。參數是
+  `const unsigned char[16]` 的參考而不是指標，因為引擎會讀滿那麼多 byte。
+  沒有要求的 site 不會被檢查。
+
 把位址交給協調 tier 之前值得知道的兩個行為：
 
 - **它會跟隨 jump thunk。** 另一個 translation unit 的函式，`&function` 在
