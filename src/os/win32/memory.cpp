@@ -254,12 +254,15 @@ void restore_data_protection(void* addr, std::size_t size,
     }
 }
 
-void flush_instruction_cache(void* addr, std::size_t size) {
+bool flush_instruction_cache(void* addr, std::size_t size) {
     // x86 / x86_64 are cache-coherent for instruction streams, so this is a
     // no-op in practice. Windows' FlushInstructionCache is still the right
     // primitive to call — it will do the needful on ARM64/WoA if we ever
     // target that.
-    ::FlushInstructionCache(::GetCurrentProcess(), addr, size);
+    if (::FlushInstructionCache(::GetCurrentProcess(), addr, size) != FALSE) return true;
+    SPLICE_LOGW("flush_instruction_cache(%p, %zu): failed, err=%lu",
+                addr, size, ::GetLastError());
+    return false;
 }
 
 } // namespace splice::os

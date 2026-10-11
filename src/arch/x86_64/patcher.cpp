@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 #include <limits>
 
 namespace splice::arch::x86_64 {
@@ -103,6 +104,31 @@ std::size_t emit_prologue_copy(std::uint8_t* dst, const std::uint8_t* src,
 }
 
 } // namespace
+
+PreparedStrictPatch::PreparedStrictPatch(PreparedStrictPatch&& other) noexcept {
+    *this = std::move(other);
+}
+
+PreparedStrictPatch& PreparedStrictPatch::operator=(PreparedStrictPatch&& other) noexcept {
+    if (this == &other) return *this;
+    if (storage_ && !committed_) {
+        splice::os::free_executable_memory(storage_, kNearBlockSize);
+    }
+    target_ = other.target_;
+    storage_ = other.storage_;
+    write_ = other.write_;
+    std::memcpy(expected_, other.expected_, sizeof(expected_));
+    std::memcpy(source_offsets_, other.source_offsets_, sizeof(source_offsets_));
+    std::memcpy(relocated_offsets_, other.relocated_offsets_, sizeof(relocated_offsets_));
+    boundary_count_ = other.boundary_count_;
+    copy_size_ = other.copy_size_;
+    committed_ = other.committed_;
+    // The source keeps its bookkeeping but loses the only field its destructor
+    // acts on, so a moved-from plan is inert rather than dangerous.
+    other.storage_ = nullptr;
+    other.committed_ = false;
+    return *this;
+}
 
 PreparedStrictPatch::~PreparedStrictPatch() {
     if (storage_ && !committed_) splice::os::free_executable_memory(storage_, kNearBlockSize);
@@ -188,6 +214,19 @@ bool PreparedStrictPatch::commit_write() noexcept {
     commit_atomic_jmp_rel32(write_);
     committed_ = true;
     return true;
+}
+
+bool PreparedStrictPatch::restore_write() noexcept {
+    // Deliberately does NOT compare the target against what the patch wrote.
+    // The reason to restore is that something else in the same transaction
+    // failed, and refusing to put a prologue back because it does not look the
+    // way we expect would leave a live patch behind on exactly the path that
+    // exists to remove it. The restore is the same single aligned store the
+    // disable path uses, with the same alignment fallback.
+    if (!storage_ || !committed_) return false;
+    if (copy_size_ == 0 || copy_size_ > 16) return false;
+    return atomic_disable_inline(target_, expected_,
+                                 static_cast<unsigned int>(copy_size_));
 }
 
 void* install_inline_patch(void* target, void* new_func, void** original_func,

@@ -30,7 +30,7 @@ bool make_executable_writable(void*, std::size_t size) {
     return false;
 }
 void restore_executable(void*, std::size_t) { ++restore_requests; }
-void flush_instruction_cache(void*, std::size_t) {}
+bool flush_instruction_cache(void*, std::size_t) { return true; }
 std::size_t page_size() { return 4096; }
 }
 

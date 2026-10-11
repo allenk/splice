@@ -253,4 +253,8 @@ bool set_pc(ThreadRef ref, std::uintptr_t pc) noexcept {
     return ::SetThreadContext(handle, &context) != FALSE;
 }
 
+std::uint32_t last_error() noexcept {
+    return static_cast<std::uint32_t>(::GetLastError());
+}
+
 } // namespace splice::os

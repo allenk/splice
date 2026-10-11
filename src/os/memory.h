@@ -60,7 +60,13 @@ void restore_executable(void* addr, std::size_t size);
 
 // Invalidate the instruction cache over [addr, addr+size). Wraps GCC's
 // __builtin___clear_cache on POSIX.
-void flush_instruction_cache(void* addr, std::size_t size);
+//
+// Returns false when the OS reported a failure. Deliberately not
+// [[nodiscard]]: most callers have nothing to do about it, and the one that
+// does -- the group transaction, which has threads suspended and must decide
+// whether resuming them is safe -- would rather have the answer than a
+// warning. The POSIX builtin cannot fail and this always reports true there.
+bool flush_instruction_cache(void* addr, std::size_t size);
 
 // ─── Writable windows over data we do not own ──────────────────────────────
 //

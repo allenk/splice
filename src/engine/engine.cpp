@@ -22,6 +22,7 @@
 
 #include <splice/engine.h>
 
+#include "install_lock.h"
 #include "slot_patcher.h"
 #include "vtable_slot.h"
 
@@ -273,10 +274,9 @@ void* unwrap_jump_stub(void* target) {
 // Note what this does NOT make safe: patching a function while other threads
 // EXECUTE it. That is what the atomic install sequence is for, and it is
 // unrelated to this lock.
-std::mutex& install_mutex() {
-    static std::mutex m;
-    return m;
-}
+// The definition moved below the file-local namespace when the group
+// transaction needed the same lock -- see install_lock.h for why it must be the
+// same one and not a second.
 
 void* hook_by_address(void* target_addr, void* new_func, void** original_func,
                       PrePatchFn pre_cb = nullptr, void* pre_user = nullptr,
@@ -286,7 +286,7 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
         return nullptr;
     }
 
-    const std::lock_guard<std::mutex> installing(install_mutex());
+    const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
 
     // Follow one level of jump-stub indirection (MSVC ILT, DLL imports).
     target_addr = unwrap_jump_stub(target_addr);
@@ -409,6 +409,15 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
 
 } // namespace
 
+namespace splice::engine {
+
+std::mutex& install_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+} // namespace splice::engine
+
 extern "C" {
 
 void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
@@ -420,7 +429,7 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
 #if defined(SPLICE_HAS_X86_64_BACKEND)
     if (target_addr == nullptr || new_func == nullptr || expected_bytes == nullptr ||
         expected_size != 16) return nullptr;
-    const std::lock_guard<std::mutex> installing(install_mutex());
+    const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
     if (is_own_patch_site(target_addr)) return nullptr;
     unsigned char snapshot[16];
     std::memcpy(snapshot, expected_bytes, sizeof(snapshot));
@@ -510,7 +519,7 @@ int splice_disable(const splice_patch_record* record) {
         return -1;
     }
 
-    const std::lock_guard<std::mutex> disabling(install_mutex());
+    const std::lock_guard<std::mutex> disabling(splice::engine::install_mutex());
 
     switch (record->strategy) {
         case SPLICE_PATCH_STRATEGY_POINTER_SWAP: {
@@ -637,7 +646,7 @@ int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
     // given at the top of splice_disable: this makes a page writable, writes,
     // and makes it read-only again, and page protection is not reference
     // counted.
-    const std::lock_guard<std::mutex> installing(install_mutex());
+    const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
 
     void* previous = nullptr;
     if (!splice::engine::swap_pointer_slot(slot, new_func, &previous)) {

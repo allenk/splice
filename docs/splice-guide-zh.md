@@ -133,10 +133,20 @@ if (!overlay.ok()) { /* overlay.state()、overlay.failure() 說明發生了什�
 | Tier | 機制 | 需要協調嗎 | 影響範圍 |
 |---|---|---|---|
 | `splice::slot_swap` | 一次 pointer 大小的 atomic store 寫進 vtable slot | 不需要 | 只有那張 vtable；另一個 overlay 換同一個 slot 會蓋掉你，或你蓋掉它 |
-| `splice::live` | inline patch slot 指向的那個函式 | 需要執行協調 | 不受其他 overlay 換 slot 影響 |
+| `splice::live` | inline patch slot 指向的那個函式 | 把其他每個執行緒暫停一次 | 不受其他 overlay 換 slot 影響，因為既有的 slot 指標全部仍然有效 |
 
-`install(splice::live)` **尚未實作，會拒絕**，並在 log 裡說明原因。它不會退回
-去做 slot swap：一個 tier 悄悄變成較弱的 tier，比直接說不要糟。
+**今天該用的是 `splice::slot_swap`。** 協調 tier 已經實作並且有測試 —— 它把其他
+每個執行緒暫停一次，把落在被替換位元組範圍內的 program counter 映射過去，寫入
+每個 site，然後恢復 —— 但它依賴的一件事還沒有被證明：它暫停的那組執行緒是完整
+的。在列舉與暫停之間建立的執行緒不在裡面。另外，決定「停在被替換位元組**內部**
+的執行緒」行為的那個 fixture 也還沒寫。在這兩件事完成之前，這個 tier 是給讀完
+上面兩句並接受它們的呼叫者的 opt-in，不是一個有文件的功能，本文件也不會叫你
+去用它。
+
+`splice::live_tier_available()` 回答這個 build 上這個 tier 能不能跑：它需要一個
+prologue 可以規劃的架構，以及一個能暫停執行緒並移動其 program counter 的 OS，
+今天是 Windows 上的 x86_64。其他地方它回傳 false，`install(splice::live)` 會拒
+絕。它永遠不會退回去做 slot swap —— 一個 tier 悄悄變成較弱的 tier，比直接說不要糟。
 
 **全成功或全不做。** 第五個方法安裝失敗時，已經寫入的四個會在 `install` 回傳前
 復原，結果是 `State::recovered` —— 什麼都沒發佈，可以安全重試。`State::refused`
@@ -160,6 +170,22 @@ slot index —— Itanium ABI 是算術，MSVC 是解碼編譯器產生的 dispa
 **一個要先知道的限制。** 每個被 hook 的方法會從該簽章的 stub pool 取用一個，
 `SPLICE_SLOT_STUBS_PER_SIGNATURE` 預設 8。用完時整組會拒絕並說明；同一簽章需要
 同時存在更多 site 時調高這個 macro。
+
+**一個 group 不一定要是介面。** `splice::Live` 用位址填同一個 group，給不是方法
+的目標：
+
+```cpp
+splice::Live<> group;
+auto outcome = group
+    .at(present_addr, Present_t{}, present_cb)     // 型別帶著簽章
+    .at(signal_addr,  Signal_t{})  .before(note_signal)
+    .install(splice::live);
+```
+
+簽章來自一個函式指標型別的值，跟 `SPLICE_HOOK_ADDR` 把型別當 macro 引數接走的
+方式一樣；那個值永遠不會被呼叫。每個閘的行為和 vtable site 上一致。用這種方式
+命名的 group 沒有 slot 可以換，所以它會拒絕 `splice::slot_swap`，而不是去寫一個
+不是 vtable entry 的東西。
 
 ### 3.5 Disable 與生命週期
 

@@ -152,11 +152,24 @@ install unless the slot still holds the function you expected.
 | Tier | Mechanism | Coordination | Reaches |
 |---|---|---|---|
 | `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | only that vtable; another overlay swapping the same slot displaces you, or you displace it |
-| `splice::live` | inline patch of the function the slot points at | needs execution coordination | survives other overlays' slot swaps |
+| `splice::live` | inline patch of the function the slot points at | every other thread suspended once | survives other overlays' slot swaps, because every existing slot pointer stays valid |
 
-`install(splice::live)` is **not implemented yet and refuses**, with the reason
-in the log. It does not fall back to a slot swap: a tier that silently becomes
-a weaker tier is worse than one that says no.
+**`splice::slot_swap` is the tier to use today.** The coordinated tier is built
+and tested -- it suspends every other thread once, maps any program counter
+that sits inside the bytes being replaced, writes every site and resumes -- but
+one thing it rests on is not yet proved: that the thread set it suspends is
+complete. A thread created between the enumeration and the suspension is not in
+it. The fixture that settles the behaviour of a thread stopped *inside* the
+bytes being replaced is also not written yet. Until both exist, this tier is an
+opt-in for a caller who has read the two sentences above and accepted them, not
+a documented feature, and nothing in this guide tells you to reach for it.
+
+`splice::live_tier_available()` says whether the tier can run at all on this
+build: it needs an architecture whose prologue can be planned and an OS that
+can suspend a thread and move its program counter, which today means x86_64 on
+Windows. Everywhere else it returns false and `install(splice::live)` refuses.
+It never falls back to a slot swap -- a tier that silently becomes a weaker
+tier is worse than one that says no.
 
 **All or nothing.** If the fifth method fails to install, the four already
 written are restored before `install` returns, and the result is
@@ -184,6 +197,23 @@ does **not** uninstall — the hooks stay, like a `SPLICE_HOOK_STATIC` call site
 per-signature pool, `SPLICE_SLOT_STUBS_PER_SIGNATURE`, which defaults to 8. A
 group that runs out refuses and says so; raise the macro if you need more live
 sites of one signature at a time.
+
+**A group does not have to be an interface.** `splice::Live` fills the same
+group by address, for a target that is not a method:
+
+```cpp
+splice::Live<> group;
+auto outcome = group
+    .at(present_addr, Present_t{}, present_cb)     // the type carries the signature
+    .at(signal_addr,  Signal_t{})  .before(note_signal)
+    .install(splice::live);
+```
+
+The signature comes from a value of the function-pointer type, the way
+`SPLICE_HOOK_ADDR` takes it as a macro argument; the value is never called.
+Every gate applies as it does on a vtable site. A group named this way has no
+slot to swap, so it refuses `splice::slot_swap` rather than writing something
+that is not a vtable entry.
 
 ### 3.5 Disable and lifecycle
 
@@ -388,6 +418,10 @@ group.on_slot(index, pmf [, callback])     // name the slot by hand
 group.non_reentrant([scope])               // one scope for every method
 splice::Outcome o = group.install(splice::slot_swap);   // or splice::live
 
+splice::Live<> addressed;                  // the same group, named by address
+addressed.at(target, FuncType{} [, callback])
+splice::live_tier_available()              // can the coordinated tier run here
+
 o.ok(); o.state(); o.failure(); o.installed_sites();
 o.active();                     // are the hooks in place NOW
 o.disable();                    // restore every slot, release the stubs
@@ -398,6 +432,8 @@ splice_vtable_swap(slot, fn, &prev, &rec); // C ABI: one atomic pointer store
 
 `splice::State` is `installed` / `refused` / `recovered` / `lost`;
 `splice::Failure` carries the site, stage, operation, thread id and OS error.
+`splice::Stage` is `none` / `prepare` / `enlist` / `map` / `write` / `migrate` /
+`flush` / `resume`; the slot_swap tier only ever reports the first three.
 See §3.4b.
 
 ### 6.4 RAII helpers

@@ -48,7 +48,7 @@ void restore_executable(void* address, std::size_t size) {
     restored_size = size;
 }
 
-void flush_instruction_cache(void*, std::size_t) {}
+bool flush_instruction_cache(void*, std::size_t) { return true; }
 std::size_t page_size() { return 4096; }
 }
 

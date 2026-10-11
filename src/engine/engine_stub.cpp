@@ -28,6 +28,27 @@ int splice_vtable_swap(void**, void*, void**, splice_patch_record*) {
     return -1;
 }
 
+int splice_live_supported(void) { return 0; }
+
+void* splice_live_prepare(const splice_live_site*, unsigned int, void**,
+                          splice_live_outcome* out) {
+    SPLICE_LOGW_ONCE("splice_live_prepare: no backend compiled for this platform");
+    if (out != nullptr) {
+        *out = splice_live_outcome{};
+        out->state = SPLICE_LIVE_REFUSED;
+    }
+    return nullptr;
+}
+
+void splice_live_commit(void*, splice_patch_record*, splice_live_outcome* out) {
+    if (out != nullptr) {
+        *out = splice_live_outcome{};
+        out->state = SPLICE_LIVE_REFUSED;
+    }
+}
+
+void splice_live_release(void*) {}
+
 void* splice_hook_address_strict_pre_rec(void*, void*, void**,
                                         splice_pre_patch_fn, void*,
                                         const unsigned char*, unsigned int,

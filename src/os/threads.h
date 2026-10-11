@@ -111,4 +111,13 @@ void release_thread(ThreadRef ref) noexcept;
 // restores everything.
 [[nodiscard]] bool set_pc(ThreadRef ref, std::uintptr_t pc) noexcept;
 
+// Whatever the OS last said about why one of the calls above failed, as a
+// number worth putting in a report. GetLastError on Windows, errno elsewhere.
+//
+// Read it immediately after the call that failed and nowhere else. It exists
+// because a failure record that says "suspend failed on thread 4132" is a
+// bug report and one that says "suspend failed" is a shrug, and the number is
+// the only part of that a layer above the OS cannot reconstruct.
+[[nodiscard]] std::uint32_t last_error() noexcept;
+
 } // namespace splice::os

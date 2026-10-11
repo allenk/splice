@@ -198,6 +198,114 @@ int splice_vtable_slot_of_pmf(const void* pmf_bytes, unsigned int pmf_size);
 int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
                        splice_patch_record* out_record);
 
+// ─── The coordinated tier: a group of inline patches, one suspension ──────
+//
+// Two calls, and the split is the contract. `prepare` does every allocation,
+// opens every thread reference and makes every target writable; `commit`
+// suspends, writes and resumes. In between, the caller publishes whatever a
+// reader will need behind the new code -- the original function pointer and
+// the callback -- because doing that inside the suspension would mean taking a
+// lock while another thread is suspended, which is how a process stops.
+//
+// Why a group at all: installing N sites one at a time means N suspensions of
+// every thread, N thread enumerations at about 118 ms each, and no way back if
+// the fifth of seven fails. One transaction writes all of them or none.
+
+typedef struct {
+    void* target;        // the function whose prologue is replaced
+    void* replacement;   // where it should jump: the caller's stub
+    // 16 bytes the caller believes are at `target`, or NULL. When given and
+    // the target does not match, prepare refuses. Supply it when you have an
+    // independent expectation -- it is the only check that can notice someone
+    // else has already patched the function.
+    const unsigned char* expected;
+} splice_live_site;
+
+typedef enum {
+    SPLICE_LIVE_INSTALLED = 0,   // every site written, every thread resumed
+    SPLICE_LIVE_REFUSED   = 1,   // nothing written; threads resumed
+    SPLICE_LIVE_RECOVERED = 2,   // the attempt was undone before resuming
+    SPLICE_LIVE_LOST      = 3,   // the world could not be restored
+} splice_live_state;
+
+// Where it stopped. `complete` never appears in a failure.
+typedef enum {
+    SPLICE_LIVE_STAGE_PREPARE  = 0,
+    SPLICE_LIVE_STAGE_ENLIST   = 1,
+    SPLICE_LIVE_STAGE_MAP      = 2,
+    SPLICE_LIVE_STAGE_MIGRATE  = 3,
+    SPLICE_LIVE_STAGE_WRITE    = 4,
+    SPLICE_LIVE_STAGE_FLUSH    = 5,
+    SPLICE_LIVE_STAGE_RESUME   = 6,
+    SPLICE_LIVE_STAGE_COMPLETE = 7,
+} splice_live_stage;
+
+// What was being attempted when it stopped.
+typedef enum {
+    SPLICE_LIVE_OP_NONE          = 0,
+    SPLICE_LIVE_OP_PREPARE_SITE  = 1,
+    SPLICE_LIVE_OP_ENUMERATE     = 2,
+    SPLICE_LIVE_OP_SUSPEND       = 3,
+    SPLICE_LIVE_OP_CAPTURE_PC    = 4,
+    SPLICE_LIVE_OP_SET_PC        = 5,
+    SPLICE_LIVE_OP_WRITE_SITE    = 6,
+    SPLICE_LIVE_OP_RESTORE_SITE  = 7,
+    SPLICE_LIVE_OP_FLUSH_SITE    = 8,
+    SPLICE_LIVE_OP_RESUME_THREAD = 9,
+} splice_live_operation;
+
+// Plain old data, filled by splice, rich enough that nobody has to wrap the
+// seam to find out what happened.
+typedef struct {
+    int          state;       // splice_live_state
+    unsigned int site;        // which member of the group, counted from zero
+    int          stage;       // splice_live_stage
+    int          operation;   // splice_live_operation
+    unsigned int thread_id;   // on whom; 0 when not thread-specific
+    unsigned int os_error;    // GetLastError()/errno at the failure point
+} splice_live_outcome;
+
+// Plan every site. Allocates trampolines, snapshots prologues, builds the
+// instruction-boundary maps, makes the targets writable and opens a reference
+// to every other thread of the process. **Nothing is written to any target.**
+//
+// `originals_out`, when given, receives `count` pointers: each one calls the
+// original behaviour of the matching site, and is what the caller publishes
+// before committing.
+//
+// Returns an opaque group handle, or NULL with `out` saying why. A NULL return
+// means every target is untouched. The handle must be released exactly once
+// with splice_live_release, whether or not commit is called or succeeds.
+// Non-zero when this build can run the coordinated tier at all: it needs an
+// architecture whose prologue can be planned and an OS that can suspend a
+// thread and move its program counter. Ask before offering the tier to a user,
+// rather than discovering it from a refusal.
+int splice_live_supported(void);
+
+void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
+                          void** originals_out, splice_live_outcome* out);
+
+// Suspend every other thread, map any program counter that sits inside the
+// bytes being replaced, write every site, flush, resume. One attempt per
+// group.
+//
+// `records_out`, when given and the outcome is installed, receives `count`
+// patch records so each site can later be reversed with splice_disable.
+//
+// On `refused` nothing was written. On `recovered` the writes were undone
+// before any thread resumed. On `lost` the threads are **still suspended** and
+// the module must not be unloaded: that is what the word means, and it is the
+// one outcome the caller genuinely has to decide something about.
+void splice_live_commit(void* group, splice_patch_record* records_out,
+                        splice_live_outcome* out);
+
+// Release the group's bookkeeping: the thread references, and the page
+// protection prepare changed. Does **not** uninstall anything, and never frees
+// a trampoline -- a group that failed has retained its trampolines because a
+// thread may have been migrated into one, and a group that succeeded is using
+// them.
+void splice_live_release(void* group);
+
 // Disable a previously-installed hook described by `record`.
 // Returns:
 //    0 on success

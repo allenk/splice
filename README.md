@@ -107,10 +107,15 @@ if (!overlay.ok()) { /* overlay.state() and overlay.failure() say what happened 
 
 Virtual methods are resolved to vtable slots per C++ ABI, and refuse rather than
 guess when they cannot be — `.on_slot(8, &I::Present, cb)` names the index by
-hand with the signature still checked. The second tier, `splice::live`, inline-
-patches the function the slot points at; it needs execution coordination that is
-not implemented yet, so `install(splice::live)` refuses instead of quietly doing
-a slot swap.
+hand with the signature still checked.
+
+The second tier, `splice::live`, inline-patches the function the slot points at
+under one suspension of every other thread, so it survives another overlay
+swapping the same slot. It is built and tested, and it is **not a documented
+feature yet**: the completeness of the thread set it suspends is not proved, and
+the fixture for a thread stopped inside the bytes being replaced is not written.
+Use `splice::slot_swap`. `splice::live_tier_available()` reports whether the
+coordinated tier can run at all on a given build.
 
 **Hook a C++ member function — `this` becomes the first explicit arg:**
 

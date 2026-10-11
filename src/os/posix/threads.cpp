@@ -33,6 +33,8 @@
 // ───────────────────────────────────────────────────────────────────────────
 #include "../threads.h"
 
+#include <cerrno>
+
 namespace splice::os {
 
 Enumeration enumerate_other_threads(std::span<ThreadRef> out) noexcept {
@@ -71,6 +73,13 @@ bool set_pc(ThreadRef ref, std::uintptr_t pc) noexcept {
     (void)ref;
     (void)pc;
     return false;
+}
+
+std::uint32_t last_error() noexcept {
+    // Reported even though every call above refuses without touching errno:
+    // when the posix implementation arrives, the one thing that must not also
+    // need adding is the field the failure record already promises.
+    return static_cast<std::uint32_t>(errno);
 }
 
 } // namespace splice::os

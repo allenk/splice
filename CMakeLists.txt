@@ -238,6 +238,7 @@ if(SPLICE_HAS_ENGINE)
     list(APPEND _splice_sources
         src/engine/engine.cpp
         src/engine/slot_patcher.cpp   # a pointer slot, with the page put back
+        src/engine/live_install.cpp   # N inline patches under one suspension
     )
 
     # OS layer — one of POSIX or Win32, never both.

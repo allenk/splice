@@ -24,9 +24,41 @@ All notable changes to Splice are documented here. Format follows
     the signature still checked.
   - Two tiers, named: `splice::slot_swap` stores one pointer into the vtable slot
     and needs no coordination; `splice::live` inline-patches the function behind
-    the slot and needs execution coordination that is not implemented yet, so
-    `install(splice::live)` **refuses** rather than quietly installing the weaker
-    tier.
+    the slot, under one suspension of every other thread.
+- The coordinated tier: `splice::live`, and `splice::Live` for a group named by
+  address rather than through an interface. One transaction suspends every other
+  thread once, maps any program counter that sits inside the bytes being
+  replaced through that site's instruction-boundary map, writes every site,
+  flushes each with its own length, and resumes in reverse order. A failure
+  part-way puts the sites already written back **before any thread resumes**,
+  and reports `recovered`; `lost` means the threads are still suspended and is
+  the one outcome a caller has to decide something about.
+  - **Not a documented feature yet, deliberately.** Two things it rests on are
+    unproved: that the thread set it suspends is complete -- a thread created
+    between the enumeration and the suspension is not in it -- and the behaviour
+    of a thread stopped *inside* the bytes being replaced, which needs a
+    controlled-boundary fixture that does not exist. `splice::slot_swap` is the
+    tier to use. `splice::live_tier_available()` reports whether the coordinated
+    tier can run on a build at all; it needs an architecture whose prologue can
+    be planned and an OS that can suspend a thread, which today means x86_64 on
+    Windows.
+  - `splice_live_prepare` / `splice_live_commit` / `splice_live_release` on the
+    C ABI, split in three because of what may happen when: prepare does every
+    allocation, opens every thread reference and makes every target writable,
+    the caller publishes between the two calls, and commit suspends and writes
+    without allocating or taking a lock. Publishing inside the suspension would
+    mean taking a lock while another thread is suspended.
+  - The interim Windows-only `commit_enlisted` primitive and the
+    `splice::os::win32` namespace are gone. Its fifteen-case fault matrix is
+    carried over onto the group transaction and extended to twenty-two,
+    including the row it could not express -- a write failure at the sixth site
+    restoring the five before it, with the restore proved to happen before any
+    thread is resumed -- and the whole matrix now runs on Linux as well, where
+    the Windows-only original never did.
+  - `splice::os::flush_instruction_cache` reports failure instead of returning
+    void. It is the one operation after the writes have landed, so its failure
+    cannot be answered by undoing anything; the transaction leaves the threads
+    suspended and says `lost`.
 - `SPLICE_PATCH_STRATEGY_DATA_SLOT` and `splice_vtable_swap` /
   `splice_vtable_slot_of_pmf` on the C ABI. A vtable slot differs from a GOT or
   IAT slot in one way that matters: its page may be read-only, writable, or on

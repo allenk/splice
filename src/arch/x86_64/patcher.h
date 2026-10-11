@@ -40,6 +40,12 @@ public:
     ~PreparedStrictPatch();
     PreparedStrictPatch(const PreparedStrictPatch&) = delete;
     PreparedStrictPatch& operator=(const PreparedStrictPatch&) = delete;
+
+    // Movable, because a group of these lives in a vector. Copying one would
+    // mean two owners of a trampoline and a double free; moving one leaves the
+    // source holding nothing, so its destructor has nothing to release.
+    PreparedStrictPatch(PreparedStrictPatch&& other) noexcept;
+    PreparedStrictPatch& operator=(PreparedStrictPatch&& other) noexcept;
     bool prepare(void* target, void* replacement, const unsigned char* expected,
                  std::size_t expected_size);
     void* original() const noexcept { return storage_; }
@@ -53,6 +59,12 @@ public:
     // IPs outside the displaced prefix are returned unchanged.
     bool map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept;
     bool commit_write() noexcept;
+    // Put the prologue back, for a group whose later site failed. Only valid
+    // after commit_write, and only while the callers are excluded -- which for
+    // the group transaction means while every other thread is still suspended.
+    // The storage is retained either way: a thread may have been migrated into
+    // it, and an address something might still reach is not free.
+    bool restore_write() noexcept;
 private:
     void* target_{};
     void* storage_{};

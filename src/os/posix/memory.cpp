@@ -295,9 +295,10 @@ void restore_data_protection(void* addr, std::size_t size,
     }
 }
 
-void flush_instruction_cache(void* addr, std::size_t size) {
+bool flush_instruction_cache(void* addr, std::size_t size) {
     auto* begin = static_cast<char*>(addr);
     __builtin___clear_cache(begin, begin + size);
+    return true;   // the builtin has no failure to report
 }
 
 } // namespace splice::os

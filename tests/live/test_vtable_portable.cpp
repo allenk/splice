@@ -326,21 +326,9 @@ TEST_F(VtableGroup, before_and_after_read_the_call_without_replacing_it) {
     EXPECT_EQ(seen_result.load(), 7);
 }
 
-TEST_F(VtableGroup, install_on_the_live_tier_refuses_and_writes_nothing) {
-    ICalculator* calc = splice::test::calculator();
-
-    splice::Outcome outcome = splice::Vtable<ICalculator>{calc}
-        .on(&ICalculator::scale, [](auto orig, ICalculator* self, int value) {
-            g_scale_calls.fetch_add(1);
-            return orig(self, value) + 1;
-        })
-        .install(splice::live);
-
-    EXPECT_EQ(outcome.state(), splice::State::refused);
-    EXPECT_EQ(outcome.installed_sites(), 0u);
-    EXPECT_EQ(calc->scale(5), 15);
-    EXPECT_EQ(g_scale_calls.load(), 0);
-}
+// The coordinated tier is tested in test_live_tier.cpp, where the assertion
+// that matters is that the vtable SLOT is left alone -- the one observation
+// that separates it from this tier doing the work.
 
 TEST_F(VtableGroup, a_group_with_no_methods_refuses) {
     splice::Outcome outcome =
