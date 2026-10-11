@@ -62,6 +62,7 @@ add_executable(splice_unit_test
     live/test_live_com_graphics.cpp
     live/test_expect_prologue.cpp
     live/test_prologue_facts.cpp
+    live/test_replace_with.cpp
     live/test_live_contention.cpp
     stress_test.cpp
     helpers/test_targets.cpp

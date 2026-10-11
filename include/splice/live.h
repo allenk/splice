@@ -454,6 +454,47 @@ public:
     Owner& onInvoke(Fn fn) {
         return commit(typename Binder::Invoke(std::move(fn)));
     }
+    // The action verb for a caller that already has its own replacement.
+    //
+    // `.onInvoke()` and friends ask splice to build the hook: a stub is
+    // claimed, the callback is stored in the registry, and the original
+    // arrives as the callback's first argument. That is the right shape for
+    // almost everything, and the wrong shape for a consumer whose replacement
+    // already exists -- an overlay whose render-thread hook reads its original
+    // out of its own atomic with acquire, because that is the only load it is
+    // willing to do per frame. Wrapping such a hook in a splice stub adds an
+    // indirection to the hottest path in the process and buys nothing.
+    //
+    // So: `replacement` is patched in directly, and `original` receives the
+    // function it displaced -- stored before the group commits, which is the
+    // same instant and the same reason as every other publication here. Read
+    // it with acquire; this writes it with release.
+    //
+    // Gates are refused with this verb rather than ignored. `.when()`,
+    // `.once()`, `.times(n)` and `.observe()` are evaluated by splice's own
+    // wrapper, and here splice is not in the call path at all -- the caller's
+    // replacement is. A gate that silently did nothing would be worse than a
+    // group that says why it will not install.
+    Owner& replace_with(FuncType replacement, std::atomic<void*>& original) {
+        if (!m_gates.transparent()) {
+            SPLICE_LOGE("splice: site %zu asked for both a gate and its own "
+                        "replacement; gates are evaluated by splice's wrapper, "
+                        "and .replace_with() puts your function in the call "
+                        "path instead, so the gate would never run",
+                        m_owner.pending_count());
+            m_owner.refuse_site(Stage::prepare, Operation::none);
+            return m_owner;
+        }
+        auto* publish_to = &original;
+        m_owner.adopt_site(
+            m_target, reinterpret_cast<void*>(replacement),
+            [publish_to](void* displaced) {
+                publish_to->store(displaced, std::memory_order_release);
+            },
+            nullptr, m_expected_prologue);
+        return m_owner;
+    }
+
     template <typename Fn>
     Owner& before(Fn fn) { return commit(Binder::from_before(std::move(fn))); }
     template <typename Fn>
@@ -647,7 +688,8 @@ public:
     // gets weakened, and this one has twenty-two cases.
     void adopt_site(void* target, void* stub,
                     std::function<void(void*)> publish,
-                    std::function<void(const splice_patch_record*)> settle) {
+                    std::function<void(const splice_patch_record*)> settle,
+                    const unsigned char* expected_prologue = nullptr) {
         const Site site{m_sites.size(), -1};
         if (m_failed) return;
         if (target == nullptr || stub == nullptr) {
@@ -666,7 +708,18 @@ public:
         pending.publish = [p = std::move(publish)](void* original,
                                                    std::uint64_t) { p(original); };
         pending.settle = std::move(settle);
+        pending.expected_prologue = expected_prologue;
         m_sites.push_back(std::move(pending));
+    }
+
+    // How many sites the group holds, so a site can name its own ordinal in a
+    // message it logs before it has been added.
+    [[nodiscard]] std::size_t pending_count() const noexcept { return m_sites.size(); }
+
+    // A site that cannot be used at all, refused before it is added. Public
+    // for the same reason add_pending is: the site is a separate class.
+    void refuse_site(Stage stage, Operation operation) {
+        fail(stage, operation, 0, Site{m_sites.size(), -1});
     }
 
     // Used by GroupSite. Public only because the site is a separate class;

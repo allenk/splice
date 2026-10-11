@@ -209,6 +209,33 @@ if (!all.ok()) { /* all.state(), all.failure() */ }
 就是兩個都叫 —— 而 entry 之所以被告知，正是為了讓第二次呼叫回報失敗，而不是去
 還原一段已經是原狀的位元組。
 
+**当你已經有 hook：`.replace_with()`。**
+
+`.onInvoke()` 那一系是請 splice 幫你建 hook —— 申請一個 stub、把你的 callback
+放進 registry、原函式當成 callback 的第一個參數交給你。那對絕大多數情況是對的
+形狀；如果你的 replacement 本來就存在、而且自己從 atomic 讀出被取代的那個函式，
+它就是錯的形狀。overlay 的 render thread hook 正是後者，把它再包一層 splice stub
+只是在 process 最熱的路徑上白白多一層間接。
+
+```cpp
+std::atomic<void*> original_present;
+HRESULT STDMETHODCALLTYPE MyPresent(IDXGISwapChain* c, UINT i, UINT f);
+
+splice::Outcome o = group
+    .at(present_addr, Present_t{})
+        .expect_prologue(snapshot)
+        .replace_with(&MyPresent, original_present)
+    .install(splice::live);
+```
+
+`replacement` 會被直接 patch 進去，`original` 收到被它取代的那個函式，而且是在
+group **commit 之前**就寫好 —— 所以一個在 patch 落地那一瞬間抵達的執行緒，會發現
+它已經在那裡。用 acquire 讀；splice 用 release 寫。
+
+這個動詞下 gate 是被**拒絕**而不是被忽略。`.when()`、`.once()`、`.times(n)`、
+`.observe()` 是由 splice 自己的 wrapper 評估的，而這裡在呼叫路徑上的是你的函式，
+gate 永遠不會跑到。同時要兩者的 group 會說出來，且一個 site 都不裝。
+
 兩個「後到」的防護，用在不同的地方：
 
 - `.expect(address)` 在 **slot** 還持有你預期的那個函式時才安裝。用於

@@ -98,6 +98,21 @@ All notable changes to Splice are documented here. Format follows
   unresolvable symbol, an unavailable re-entrancy scope, or an installer
   registered with no group path), when there is nothing left to install, and for
   `splice::slot_swap`, which has no slot behind a queued hook to swap.
+- `.replace_with(replacement, original)` — the action verb for a caller that
+  already has its own hook. `.onInvoke()` and friends ask splice to build one:
+  a stub is claimed, the callback goes into the registry, and the original
+  arrives as its first argument. A consumer whose render-thread hook is
+  already a function, and which reads what it displaced out of its own atomic
+  with acquire because that is the only load it will do per frame, wants
+  neither — wrapping it adds an indirection to the hottest path in the
+  process and buys nothing. The replacement is patched in directly and the
+  original is stored, with release, before the group commits.
+  
+  Gates are refused with this verb rather than ignored: they are evaluated by
+  splice's wrapper, and here the caller's function is in the call path
+  instead, so a `.once()` would never run. Until now the only way to express
+  any of this was the three-call C ABI by hand, which works and is exactly the
+  packaging this release set out to replace.
 - `splice_prologue_profile` on the C ABI, reporting what a coordinated
   install would replace at a target: the patch window, the length of the
   instruction at the entry, and how many instruction starts lie strictly

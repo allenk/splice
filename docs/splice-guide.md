@@ -253,6 +253,37 @@ a hook installed on its own; calling both is the one thing to avoid, and the
 entries are told precisely so that the second call reports failure instead of
 restoring bytes that are already original.
 
+**When you already have the hook: `.replace_with()`.**
+
+`.onInvoke()` and friends ask splice to build the hook for you — a stub is
+claimed, your callback goes into the registry, and the original arrives as
+the callback's first argument. That is the right shape for almost
+everything, and the wrong shape if your replacement already exists and
+reads the function it displaced out of your own atomic. An overlay's
+render-thread hook is exactly that, and wrapping it in a splice stub adds
+an indirection to the hottest path in your process for nothing.
+
+```cpp
+std::atomic<void*> original_present;
+HRESULT STDMETHODCALLTYPE MyPresent(IDXGISwapChain* c, UINT i, UINT f);
+
+splice::Outcome o = group
+    .at(present_addr, Present_t{})
+        .expect_prologue(snapshot)
+        .replace_with(&MyPresent, original_present)
+    .install(splice::live);
+```
+
+`replacement` is patched in directly and `original` receives the function it
+displaced, stored **before** the group commits — so a thread that arrives the
+instant the patch lands finds it already there. Read it with acquire; splice
+writes it with release.
+
+Gates are **refused** with this verb, not ignored. `.when()`, `.once()`,
+`.times(n)` and `.observe()` are evaluated by splice's own wrapper, and here
+your function is in the call path instead, so the gate would never run. A
+group asked for both says so and installs nothing.
+
 Two behaviours of the coordinated tier worth knowing before you hand it an
 address:
 
@@ -516,6 +547,7 @@ group.on(pmf)                              // returns the site, for gates
      .when(p).once().times(n).observe()
      .non_reentrant([scope]).expect(addr)
      .onInvoke(cb) | .before(cb) | .after(cb)   // returns the group
+     .replace_with(my_fn, my_atomic)            // I brought my own hook
 group.on_slot(index, pmf [, callback])     // name the slot by hand
 group.non_reentrant([scope])               // one scope for every method
 splice::Outcome o = group.install(splice::slot_swap);   // or splice::live
