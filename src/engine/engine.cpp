@@ -536,6 +536,20 @@ void* splice_hook_symbol_pre_rec(const char* lib_name,
     return hook_by_address(target, new_func, original_func, pre_cb, pre_user, out_record);
 }
 
+void* splice_resolve_symbol(const char* lib_name, const char* symbol_name) {
+    if (lib_name == nullptr || lib_name[0] == '\0' || symbol_name == nullptr) {
+        SPLICE_LOGE("splice_resolve_symbol: both a library and a symbol are required");
+        return nullptr;
+    }
+    void* const target = resolve_symbol(lib_name, symbol_name);
+    if (target == nullptr) {
+        SPLICE_LOGE("splice_resolve_symbol: %s::%s not found", lib_name, symbol_name);
+        return nullptr;
+    }
+    SPLICE_LOGV("splice_resolve_symbol: %s::%s -> %p", lib_name, symbol_name, target);
+    return target;
+}
+
 int splice_disable(const splice_patch_record* record) {
     // Same lock as install, and for the same reason: this makes a page writable,
     // writes, and makes it read-only again. Page protection is not reference

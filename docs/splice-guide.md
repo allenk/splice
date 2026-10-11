@@ -202,6 +202,47 @@ coordinates nothing, so there is nothing to go wrong. Reach for `splice::live`
 when the slot is contested -- when something else may swap the same pointer and
 you need to be in the call chain regardless.
 
+### 3.4c The queue as one transaction — `install_all(splice::live)`
+
+`install_all()` has always meant "install every hook queued above", one hook at
+a time. Give it a tier and it means the same thing in one transaction:
+
+```cpp
+SPLICE_HOOK_ADDR(present_addr, decltype(&Present)).onInvoke(present_cb);
+SPLICE_HOOK_ADDR(signal_addr,  decltype(&Signal)).before(signal_cb);
+
+splice::Outcome all = splice::install_all(splice::live);
+if (!all.ok()) { /* all.state(), all.failure() */ }
+```
+
+One thread enumeration and one suspension for the whole set instead of one
+each, and all-or-nothing across it: a failure at the fourth hook cannot leave
+three installed. Everything else is unchanged — each hook keeps its own gates,
+its own `original()`, and its own `is_installed()`, because the entries are
+driven rather than bypassed.
+
+It returns `refused`, having written nothing, in three cases:
+
+- **a queued hook that cannot join.** A symbol that will not resolve, a
+  re-entrancy scope that could not be reserved, or an installer registered
+  through `register_global_installer(fn)` with no group path. Installing the
+  rest would hand you a group you believe is complete.
+- **nothing to install.** An empty queue, or every queued hook already
+  installed. `install_all()` is still safe to call twice — an already-installed
+  hook does not re-join, because re-patching a function splice already owns is
+  refused and would take the rest of the set down with it — but a call where
+  every hook is already in place has nothing to do, and `installed` would be a
+  claim about work that did not happen.
+- **`splice::slot_swap`.** A queued hook names a function, by symbol or by
+  address; there is no vtable slot behind it to swap. Use
+  `splice::Vtable<Interface>` for that tier.
+
+Disable through the returned `Outcome`, which puts every site back and tells
+each entry it is no longer installed. An entry's own `disable()` works too, for
+a hook installed on its own; calling both is the one thing to avoid, and the
+entries are told precisely so that the second call reports failure instead of
+restoring bytes that are already original.
+
 Two behaviours of the coordinated tier worth knowing before you hand it an
 address:
 
@@ -443,7 +484,8 @@ entry.disable();                // trigger disable
 ### 6.3 Global API
 
 ```cpp
-splice::install_all();          // install everything in the queue
+splice::install_all();          // install everything in the queue, one at a time
+splice::install_all(splice::live);   // ...or as one coordinated transaction
 splice::install_count();        // queue size
 splice_is_hooked(void* addr);   // detect whether addr is hooked (C ABI)
 
@@ -470,6 +512,7 @@ splice::Outcome o = group.install(splice::slot_swap);   // or splice::live
 
 splice::Live<> addressed;                  // the same group, named by address
 addressed.at(target, FuncType{} [, callback])
+splice::Outcome o = splice::install_all(splice::live);  // the queue, as one group
 splice::live_tier_available()              // can the coordinated tier run here
 
 o.ok(); o.state(); o.failure(); o.installed_sites();

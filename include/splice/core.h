@@ -71,7 +71,9 @@ public:
         // installer slot dead so install_all() skips it. Prevents the
         // pre-Task #57 hazard where stack/test-scope entries would leave
         // a dangling [this] lambda in a process-wide vector.
-        m_installer_token = register_global_installer([this]() { install(); });
+        m_installer_token = register_global_installer(
+            [this]() { install(); },
+            [this](detail::GroupContribution& out) { return join_group(out); });
     }
 
     // Constructor — direct-address hooking (for vtable slots, RVAs, etc.).
@@ -92,7 +94,9 @@ public:
         SPLICE_LOGV("InterceptorEntry create (direct): addr=%p label=%s uid=%d slot=%d tramp=%p",
                     func_addr, label, m_unique_id, m_slot, m_trampoline_ptr);
 
-        m_installer_token = register_global_installer([this]() { install_direct(); });
+        m_installer_token = register_global_installer(
+            [this]() { install_direct(); },
+            [this](detail::GroupContribution& out) { return join_group(out); });
     }
 
     // Fluent entry — the signature moment. Deliberate camelCase exception.
@@ -326,6 +330,70 @@ private:
         } else {
             SPLICE_LOGE("Hook install FAILED: %s::%s", m_lib.c_str(), m_sym.c_str());
         }
+    }
+
+    // ─── joining one coordinated transaction ──────────────────────────────
+    //
+    // The same hook as install() / install_direct(), with the steps handed to
+    // somebody else in the order a group needs them. Three differences from
+    // the single-site path, and each is the reason this is not just a call to
+    // it:
+    //
+    //   - the target is resolved here and patched later, because every site's
+    //     address must be known before the group allocates for any of them;
+    //   - the publication is a closure the group runs between prepare and
+    //     commit, which is the same instant the single-site pre-patch callback
+    //     fires and for the same reason: the registry's lock may not be taken
+    //     while a thread is suspended;
+    //   - the record arrives afterwards, and may arrive as null, which is how
+    //     this entry is told it is not installed after all.
+    bool join_group(detail::GroupContribution& out) {
+        if (m_refused) {
+            SPLICE_LOGE("Hook cannot join a group: %s::%s -- no re-entrancy "
+                        "scope was available", m_lib.c_str(), m_sym.c_str());
+            return false;
+        }
+        if (m_installed) {
+            // Already in place from an earlier install. Not a failure and not
+            // a site: install_all() has always been safe to call again, and a
+            // group that re-patched a function it already owns would be
+            // refused by the engine for being a second install on the same
+            // address -- taking every other site down with it.
+            SPLICE_LOGV("Hook already installed, not joining the group: %s::%s",
+                        m_lib.c_str(), m_sym.c_str());
+            return true;
+        }
+
+        void* target = m_direct_addr;
+        if (target == nullptr) {
+            if (m_lib.empty()) {
+                SPLICE_LOGE("Hook cannot join a group: %s has neither an "
+                            "address nor a library to resolve against",
+                            m_sym.c_str());
+                return false;
+            }
+            target = splice_resolve_symbol(m_lib.c_str(), m_sym.c_str());
+            if (target == nullptr) return false;
+        }
+
+        out.target = target;
+        out.stub   = m_trampoline_ptr;
+        out.publish = [this](void* original) {
+            m_original = reinterpret_cast<FuncType>(original);
+            OriginalRegistry::set_original(m_slot, m_original);
+        };
+        out.settle = [this](const splice_patch_record* record) {
+            if (record == nullptr) {
+                m_installed = false;
+                return;
+            }
+            m_record = *record;
+            m_installed = true;
+            SPLICE_LOGV("Hook installed in a group: %s::%s => %p (id=%d, strategy=%d)",
+                        m_lib.c_str(), m_sym.c_str(), m_trampoline_ptr,
+                        m_unique_id, m_record.strategy);
+        };
+        return true;
     }
 
     void install_direct() {

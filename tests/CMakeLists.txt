@@ -144,6 +144,19 @@ if(SPLICE_HAS_X86_64_BACKEND AND NOT CMAKE_CROSSCOMPILING)
         target_link_libraries(splice_strict_install_test PRIVATE splice_strict_decoy)
     endif()
     gtest_discover_tests(splice_strict_install_test DISCOVERY_TIMEOUT 30)
+
+    # The batch verb reaches the whole process's installer queue, so it needs a
+    # binary where "everything queued" means "what this test queued". In the
+    # shared unit binary it would install every hook every other file queued,
+    # and be refused by some unrelated target -- a refusal that would look like
+    # this feature's.
+    add_executable(splice_install_all_test live/test_install_all_tier.cpp
+                                           helpers/test_targets.cpp)
+    target_include_directories(splice_install_all_test PRIVATE
+        ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+    target_link_libraries(splice_install_all_test PRIVATE
+        splice::splice splice_warnings splice_sanitizers GTest::gtest_main)
+    gtest_discover_tests(splice_install_all_test DISCOVERY_TIMEOUT 30)
     # Real patcher with a deterministic OS fault seam; no production fault flags.
     add_executable(splice_patcher_failure_test
         test_patcher_failure.cpp

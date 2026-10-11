@@ -159,6 +159,20 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
                                          unsigned int expected_size,
                                          splice_patch_record* out_record);
 
+// Resolve a library symbol to its address, and nothing else.
+//
+// The install entry points above resolve and patch in one call, which is all a
+// single hook ever needed. A coordinated group needs the two separated: every
+// target has to be known before `splice_live_prepare` can allocate for it, and
+// prepare is the phase that may not be re-entered once anything is frozen.
+//
+// `lib_name` must name a loaded or loadable module and `symbol_name` an
+// exported symbol in it. Returns null when either cannot be found, having
+// written nothing and loaded nothing it did not already need. The returned
+// address is raw: a jump thunk is still a jump thunk here, because unwrapping
+// one is the install path's decision and depends on the tier.
+void* splice_resolve_symbol(const char* lib_name, const char* symbol_name);
+
 // ─── Vtable hooking (Tier 1 on an interface) ──────────────────────────────
 
 // The vtable slot index a pointer-to-virtual-member-function names, or -1 when

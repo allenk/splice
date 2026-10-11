@@ -86,6 +86,23 @@ All notable changes to Splice are documented here. Format follows
     void. It is the one operation after the writes have landed, so its failure
     cannot be answered by undoing anything; the transaction leaves the threads
     suspended and says `lost`.
+- `splice::install_all(splice::live)` -- the batch verb with a tier. The same
+  queue `install_all()` has always drained, installed as **one** coordinated
+  transaction: one thread enumeration and one suspension for the whole set, and
+  all-or-nothing across it, so a failure at the fourth hook cannot leave three
+  installed. Each hook keeps its own gates, `original()` and `is_installed()`,
+  because the queued entries are driven rather than bypassed, and the returned
+  `Outcome` tells each one when the group is undone -- without which an entry
+  would still believe it was installed and would restore bytes that are already
+  original. Refuses, having written nothing, when a queued hook cannot join (an
+  unresolvable symbol, an unavailable re-entrancy scope, or an installer
+  registered with no group path), when there is nothing left to install, and for
+  `splice::slot_swap`, which has no slot behind a queued hook to swap.
+- `splice_resolve_symbol` on the C ABI: resolve a library symbol to its address,
+  and nothing else. The install entry points resolve and patch in one call,
+  which is all a single hook ever needed; a group has to know every target
+  before it allocates for any of them, and prepare is the phase that may not be
+  re-entered once anything is frozen.
 - `SPLICE_PATCH_STRATEGY_DATA_SLOT` and `splice_vtable_swap` /
   `splice_vtable_slot_of_pmf` on the C ABI. A vtable slot differs from a GOT or
   IAT slot in one way that matters: its page may be read-only, writable, or on

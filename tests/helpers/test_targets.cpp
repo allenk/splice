@@ -24,6 +24,8 @@ SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_a(int x) { return
 SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_b(int x) { return x * 5; }
 SPLICE_TEST_NOINLINE int reentry_refusal_target(int x) { return x + 1; }
 SPLICE_TEST_NOINLINE int reentry_control_target(int x) { return x + 3; }
+SPLICE_TEST_NOINLINE int batch_target_a(int x) { return x * 7; }
+SPLICE_TEST_NOINLINE int batch_target_b(int x) { return x * 11; }
 
 // Large enough that no compiler will fold it into an immediate, and non-const so
 // it is not placed in a section the access could reach some cheaper way.

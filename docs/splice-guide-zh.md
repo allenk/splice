@@ -173,6 +173,42 @@ slot swap 夠用的時候就用 `splice::slot_swap`：它是一次 atomic store�
 東西，所以沒有什麼可以出錯。當那個 slot 有競爭時才動用 `splice::live` —— 當別的
 東西可能換掉同一個指標，而你需要不管怎樣都在呼叫鏈裡的時候。
 
+### 3.4c 把整個 queue 當成一個 transaction —— `install_all(splice::live)`
+
+`install_all()` 一直都是「把上面 queue 起來的每個 hook 都裝上」，一個一個裝。
+給它一個 tier，意思不變，只是變成一個 transaction：
+
+```cpp
+SPLICE_HOOK_ADDR(present_addr, decltype(&Present)).onInvoke(present_cb);
+SPLICE_HOOK_ADDR(signal_addr,  decltype(&Signal)).before(signal_cb);
+
+splice::Outcome all = splice::install_all(splice::live);
+if (!all.ok()) { /* all.state(), all.failure() */ }
+```
+
+整組只做一次執行緒列舉、一次暫停，而不是每個 hook 各做一次；而且整組是全有全無：
+第四個 hook 失敗不可能留下三個裝著。其餘一切不變 —— 每個 hook 保有自己的 gate、
+自己的 `original()`、自己的 `is_installed()`，因為那些 entry 是被驅動，不是被繞過。
+
+三種情況它會回 `refused`，而且什麼都沒寫：
+
+- **某個 queued hook 無法加入。** symbol 解析不出來、re-entrancy scope 配不到,
+  或是透過 `register_global_installer(fn)` 註冊、沒有 group 路徑的 installer。
+  把其餘裝上去，會交給你一個你以為完整的 group。
+- **沒有東西要裝。** queue 是空的，或是每個 queued hook 都已經裝好了。
+  `install_all()` 仍然可以安全地呼叫兩次 —— 已經裝好的 hook 不會再加入，因為
+  重新 patch 一個 splice 已經擁有的函式會被拒絕，而那會把整組一起拖下去 ——
+  但一個每個 hook 都已就位的呼叫沒有事情可做，而 `installed` 會是對沒發生的工作
+  做出的宣稱。
+- **`splice::slot_swap`。** queued hook 命名的是一個函式（by symbol 或 by
+  address），它背後沒有 vtable slot 可以換。那個 tier 請用
+  `splice::Vtable<Interface>`。
+
+用回傳的 `Outcome` 來 disable：它會把每個 site 放回去，並且告訴每個 entry 它已經
+不在安裝狀態。entry 自己的 `disable()` 也還能用（用於單獨裝上的 hook）；要避免的
+就是兩個都叫 —— 而 entry 之所以被告知，正是為了讓第二次呼叫回報失敗，而不是去
+還原一段已經是原狀的位元組。
+
 把位址交給協調 tier 之前值得知道的兩個行為：
 
 - **它會跟隨 jump thunk。** 另一個 translation unit 的函式，`&function` 在
@@ -377,7 +413,8 @@ entry.disable();                // 觸發 disable
 ### 6.3 全局 API
 
 ```cpp
-splice::install_all();          // 安裝 queue 中所有 hook
+splice::install_all();          // 安裝 queue 中所有 hook，一個一個裝
+splice::install_all(splice::live);   // ……或是當成一個協調 transaction
 splice::install_count();        // 查 queue 大小
 splice_is_hooked(void* addr);   // 偵測 addr 是否被 hook（C ABI）
 

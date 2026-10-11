@@ -100,6 +100,17 @@ public:
     return default_context().register_installer(std::move(fn));
 }
 
+// The same registration, plus how this installer joins one coordinated
+// transaction. Both paths install the same hook; which one runs is decided by
+// whether `install_all` was given a tier. An installer registered without a
+// group path can still be installed on its own -- it just makes
+// `install_all(splice::live)` refuse, by name, rather than silently leaving it
+// out of a group the caller believes is complete.
+[[nodiscard]] inline InstallerToken register_global_installer(std::function<void()> fn,
+                                                              detail::GroupJoin join) {
+    return default_context().register_installer(std::move(fn), std::move(join));
+}
+
 inline void install_all() {
     default_context().install_all();
 }

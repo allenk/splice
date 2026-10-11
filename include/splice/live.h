@@ -280,6 +280,11 @@ struct PendingSite {
     // shares, applied unless this site named one of its own.
     std::function<void(void* original, std::uint64_t group_bit)> publish;
     std::function<void()> release_stub;
+
+    // Only set for a site adopted from the installer queue: the entry that
+    // owns the hook has its own notion of whether it is installed, and it has
+    // to be told both when the write lands and when the group is undone.
+    std::function<void(const splice_patch_record*)> settle;
 };
 
 // A site that is installed, and what it takes to undo it.
@@ -287,6 +292,7 @@ struct InstalledSite {
     void*                 where = nullptr;    // the slot or the target, for logging
     splice_patch_record   record{};
     std::function<void()> release_stub;
+    std::function<void(const splice_patch_record*)> settle;
 };
 
 // Survives the builder. Destroying it does NOT uninstall: a chain whose
@@ -339,6 +345,9 @@ public:
         }
         if (!all) return false;
         for (auto& site : m_group->sites) {
+            // Before the stub goes back: an entry that still believed it was
+            // installed would restore these bytes a second time.
+            if (site.settle) site.settle(nullptr);
             if (site.release_stub) site.release_stub();
         }
         m_group->installed = false;
@@ -518,7 +527,8 @@ public:
                 return undo(group, pending.site, Operation::write_slot);
             }
             group->sites.push_back(detail::InstalledSite{
-                static_cast<void*>(pending.slot), record, pending.release_stub});
+                static_cast<void*>(pending.slot), record, pending.release_stub,
+                pending.settle});
         }
         return installed(group);
     }
@@ -590,10 +600,45 @@ public:
         auto group = std::make_shared<detail::GroupState>();
         group->sites.reserve(m_sites.size());
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
+            if (m_sites[i].settle) m_sites[i].settle(&records[i]);
             group->sites.push_back(detail::InstalledSite{
-                m_sites[i].target, records[i], m_sites[i].release_stub});
+                m_sites[i].target, records[i], m_sites[i].release_stub,
+                m_sites[i].settle});
         }
         return installed(group);
+    }
+
+    // A site whose stub and callback were built somewhere else -- the
+    // installer queue's entries, which own a trampoline and have already
+    // pushed their callback into the registry. Nothing here is a template,
+    // because the queue was type erased long before a group was asked for,
+    // and nothing here claims a stub, because the entry already has one.
+    //
+    // This exists so `install_all(splice::live)` is the same transaction and
+    // not a second copy of it. Rewriting a fault matrix is how an assertion
+    // gets weakened, and this one has twenty-two cases.
+    void adopt_site(void* target, void* stub,
+                    std::function<void(void*)> publish,
+                    std::function<void(const splice_patch_record*)> settle) {
+        const Site site{m_sites.size(), -1};
+        if (m_failed) return;
+        if (target == nullptr || stub == nullptr) {
+            SPLICE_LOGE("splice: adopted site %zu has no target or no stub",
+                        site.ordinal);
+            fail(Stage::prepare, Operation::resolve_slot, 0, site);
+            return;
+        }
+        detail::PendingSite pending;
+        pending.site   = site;
+        pending.target = target;
+        pending.stub   = stub;
+        // The entry's gates were wrapped around its callback when the action
+        // verb committed, so the group's scope does not apply here and the
+        // group_bit is deliberately ignored.
+        pending.publish = [p = std::move(publish)](void* original,
+                                                   std::uint64_t) { p(original); };
+        pending.settle = std::move(settle);
+        m_sites.push_back(std::move(pending));
     }
 
     // Used by GroupSite. Public only because the site is a separate class;
@@ -898,5 +943,86 @@ public:
         return at(target, tag).onInvoke(std::move(fn));
     }
 };
+
+// ─── the batch verb, with a tier ──────────────────────────────────────────
+//
+// `install_all()` already means "install every hook queued above". Giving it a
+// tier does not change what it means, only how many transactions it takes:
+//
+//     SPLICE_HOOK_ADDR(present_addr, decltype(&Present)).onInvoke(present_cb);
+//     SPLICE_HOOK_ADDR(signal_addr,  decltype(&Signal)).before(signal_cb);
+//
+//     splice::install_all(splice::live);     // one coordinated transaction
+//
+// One suspension and one thread enumeration for the whole set instead of one
+// each, and all-or-nothing across it: a failure at the fourth hook cannot
+// leave three installed.
+//
+// What it refuses, and why each refusal is better than the alternative:
+//
+//   - **a queued hook that cannot join.** A refused re-entrancy scope, a
+//     symbol that will not resolve, or an installer registered by hand with
+//     no group path. Installing the rest would hand back a group the caller
+//     believes is complete.
+//   - **an empty set.** Nothing queued, or everything already installed.
+//     `installed` would be a lie about work that did not happen.
+//
+// A hook already in place does not join and does not refuse, because
+// `install_all()` has always been safe to call again -- but a group where
+// every hook is already installed has nothing to install, which is the empty
+// set above.
+[[nodiscard]] inline Outcome install_all(live_t) {
+    const std::vector<detail::GroupJoin> joins = default_context().group_joins();
+
+    Live<> group;
+    std::size_t sites = 0;
+    for (std::size_t i = 0; i < joins.size(); ++i) {
+        if (!joins[i]) {
+            SPLICE_LOGE("splice::install_all(live): queued installer %zu has no "
+                        "group path, so this set cannot be installed as one "
+                        "transaction; install_all() with no tier still works",
+                        i);
+            return Outcome(State::refused,
+                           Failure{Site{i, -1}, Stage::prepare,
+                                   Operation::resolve_slot, 0, 0});
+        }
+        detail::GroupContribution contribution;
+        if (!joins[i](contribution)) {
+            SPLICE_LOGE("splice::install_all(live): queued hook %zu refused to "
+                        "join; nothing was installed", i);
+            return Outcome(State::refused,
+                           Failure{Site{i, -1}, Stage::prepare,
+                                   Operation::resolve_slot, 0, 0});
+        }
+        if (contribution.target == nullptr) continue;   // already installed
+        group.adopt_site(contribution.target, contribution.stub,
+                         std::move(contribution.publish),
+                         std::move(contribution.settle));
+        ++sites;
+    }
+
+    if (sites == 0) {
+        SPLICE_LOGW("splice::install_all(live): no hook needed installing "
+                    "(%zu queued)", joins.size());
+        return Outcome(State::refused,
+                       Failure{Site{0, -1}, Stage::prepare, Operation::none, 0, 0});
+    }
+
+    SPLICE_LOGI("splice::install_all(live): %zu site(s) in one transaction", sites);
+    return group.install(live);
+}
+
+// There is no vtable slot behind a queued hook -- it names a function, by
+// symbol or by address -- so this tier has nothing to swap. Refused rather
+// than quietly downgraded, for the same reason the group form refuses it: a
+// tier that silently becomes a weaker tier is worse than one that says no.
+[[nodiscard]] inline Outcome install_all(slot_swap_t) {
+    SPLICE_LOGE("splice::install_all(slot_swap): a queued hook names a function, "
+                "not a vtable slot, so there is nothing to swap. Use "
+                "splice::Vtable<Interface> for the slot_swap tier, or "
+                "splice::install_all(splice::live).");
+    return Outcome(State::refused,
+                   Failure{Site{0, -1}, Stage::prepare, Operation::write_slot, 0, 0});
+}
 
 } // namespace splice

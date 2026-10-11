@@ -67,6 +67,16 @@ SPLICE_TEST_NOINLINE int reentry_control_target(int x);
 SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_a(int x);
 SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_b(int x);
 
+// Dedicated targets for the batch verb with a tier, and the isolation
+// reasoning is stress_target's: install_all(splice::live) installs everything
+// the queue holds, so its targets must be functions no other test has an
+// opinion about. Different bodies, so identical-code folding cannot make them
+// one address -- which would turn a two-site group into a second install on
+// the same function, and be refused for a reason that has nothing to do with
+// what the test is asking.
+SPLICE_TEST_NOINLINE int batch_target_a(int x);
+SPLICE_TEST_NOINLINE int batch_target_b(int x);
+
 // ARM64 S-01: a target whose prologue really does contain a PC-relative address
 // computation, so the relocation budget that decides whether ARM64 can be hooked
 // at all is actually exercised.

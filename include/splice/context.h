@@ -25,6 +25,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 #pragma once
 
+#include <splice/engine.h>
 #include <splice/log.h>
 #include <splice/policy.h>
 #include <splice/registry_impl.h>
@@ -48,6 +49,47 @@
 namespace splice {
 
 class HookContext;
+
+namespace detail {
+
+// ─── what a queued installer contributes to a coordinated group ───────────
+//
+// `install_all()` has always meant "install every hook queued above", and it
+// has always done it one hook at a time, because a `std::function<void()>` is
+// all a loop needs. `install_all(splice::live)` means the same thing in one
+// transaction, and a transaction needs the pieces separated: the target before
+// anything is allocated, the publication between prepare and commit, and the
+// record after the write lands.
+//
+// Nothing here is a template. That is the whole difficulty: the queue is type
+// erased at registration, long before anyone asks for a group, so the entry
+// has to hand over closures rather than a signature.
+// A filled contribution with a null `target` is not an error: it means this
+// installer has nothing for the group to do, because its hook is already in
+// place. `install_all()` has always been safe to call more than once.
+struct GroupContribution {
+    void* target = nullptr;     // the function to patch, already resolved
+    void* stub   = nullptr;     // the trampoline the entry already owns
+
+    // Called with the original function, after the group has taken its
+    // permissions and before it suspends anything. Same moment, and the same
+    // reason, as the single-site path's pre-patch callback.
+    std::function<void(void* original)> publish;
+
+    // The record, once the write has landed -- or null to say the hook is not
+    // in place: a failed commit, or the group being disabled later. Without
+    // the null case the entry would still believe it was installed and a
+    // second disable would restore bytes that are already original.
+    std::function<void(const splice_patch_record*)> settle;
+};
+
+// Fills a contribution, or returns false when this installer cannot join a
+// group at all -- a refused re-entrancy scope, an unresolvable symbol, or an
+// installer registered by hand with no group path. A group is all or nothing,
+// so false refuses the whole call rather than quietly installing the rest.
+using GroupJoin = std::function<bool(GroupContribution&)>;
+
+} // namespace detail
 
 // ─── InstallerToken — RAII handle for a queued installer ───────────────────
 // Returned by `HookContext::register_installer`. Move-only. On destruction
@@ -663,7 +705,8 @@ public:
     // dead — see Task #57. m_free_slots recycles indices so long-running
     // processes don't leak vector growth.
 
-    [[nodiscard]] InstallerToken register_installer(std::function<void()> fn) {
+    [[nodiscard]] InstallerToken register_installer(std::function<void()> fn,
+                                                    detail::GroupJoin join = nullptr) {
         std::unique_lock lock(m_mutex);
         int slot;
         if (!m_free_slots.empty()) {
@@ -671,10 +714,11 @@ public:
             m_free_slots.pop_back();
             auto& s = m_installers[static_cast<std::size_t>(slot)];
             s.fn = std::move(fn);
+            s.join = std::move(join);
             s.live = true;
         } else {
             slot = static_cast<int>(m_installers.size());
-            m_installers.push_back({std::move(fn), true});
+            m_installers.push_back({std::move(fn), std::move(join), true});
         }
         SPLICE_LOGV("HookContext::register_installer: slot=%d gen=%u live=%zu",
                     slot, m_generation, live_installer_count_locked());
@@ -691,6 +735,7 @@ public:
         if (!s.live) return;
         s.live = false;
         s.fn = nullptr;                      // drop the capture immediately
+        s.join = nullptr;                    // and the group path's, same reason
         m_free_slots.push_back(slot);
     }
 
@@ -711,6 +756,24 @@ public:
         for (auto& fn : local) {
             fn();
         }
+    }
+
+    // The group paths of every live installer, snapshotted the same way and
+    // for the same reason: a join resolves a symbol and reads the registry, so
+    // it must not run under this lock.
+    //
+    // A live installer with no group path contributes a null here rather than
+    // being dropped, because the caller has to be able to tell "nothing was
+    // queued" from "something was queued that cannot join a group". The first
+    // is an empty call; the second is a refusal.
+    [[nodiscard]] std::vector<detail::GroupJoin> group_joins() const {
+        std::vector<detail::GroupJoin> local;
+        std::shared_lock lock(m_mutex);
+        local.reserve(m_installers.size());
+        for (auto& s : m_installers) {
+            if (s.live) local.push_back(s.join);
+        }
+        return local;
     }
 
     [[nodiscard]] std::size_t installer_count() const {
@@ -746,6 +809,7 @@ public:
 private:
     struct InstallerSlot {
         std::function<void()> fn;
+        detail::GroupJoin     join;     // null: cannot join a coordinated group
         bool live = false;
     };
 
