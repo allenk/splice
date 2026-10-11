@@ -20,6 +20,8 @@ SPLICE_TEST_NOINLINE int sum_five(int a, int b, int c, int d, int e) {
 SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int stress_target(int x) { return x + 1; }
 SPLICE_TEST_NOINLINE int policy_target_a(int x) { return x + 1; }
 SPLICE_TEST_NOINLINE int policy_target_b(int x) { return x * 2; }
+SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_a(int x) { return x * 3; }
+SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_b(int x) { return x * 5; }
 SPLICE_TEST_NOINLINE int reentry_refusal_target(int x) { return x + 1; }
 SPLICE_TEST_NOINLINE int reentry_control_target(int x) { return x + 3; }
 

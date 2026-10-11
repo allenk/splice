@@ -252,6 +252,14 @@ bool find_mapping(const void* addr, Mapping& out) {
 
 } // namespace
 
+bool is_readable(const void* addr, std::size_t size) noexcept {
+    if (addr == nullptr || size == 0) return false;
+    Mapping mapping;
+    if (!find_mapping(addr, mapping)) return false;
+    if ((mapping.prot & PROT_READ) == 0) return false;
+    return reinterpret_cast<std::uintptr_t>(addr) + size <= mapping.end;
+}
+
 bool make_data_writable(void* addr, std::size_t size, DataProtection& saved) noexcept {
     if (addr == nullptr || size == 0) return false;
 

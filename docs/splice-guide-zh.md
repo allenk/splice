@@ -151,6 +151,15 @@ slot swap 夠用的時候就用 `splice::slot_swap`：它是一次 atomic store�
 東西，所以沒有什麼可以出錯。當那個 slot 有競爭時才動用 `splice::live` —— 當別的
 東西可能換掉同一個指標，而你需要不管怎樣都在呼叫鏈裡的時候。
 
+把位址交給協調 tier 之前值得知道的兩個行為：
+
+- **它會跟隨 jump thunk。** 另一個 translation unit 的函式，`&function` 在
+  incremental linking 下往往是一個 ILT thunk，import 也是 thunk。這個 tier 會
+  patch 它們後面那個函式，也就是你本來的意思。
+- **對同一個函式的第二次安裝會被拒絕。** 已安裝的 patch 本身也是一個 jump，所以
+  串接到它上面會走進 splice 自己的 relay。串接是一個真正的功能，也是一個設計
+  問題；在那個問題有答案之前，誠實的答案是不行。
+
 `splice::live_tier_available()` 回答這個 build 上這個 tier 能不能跑：它需要一個
 prologue 可以規劃的架構，以及一個能暫停執行緒並移動其 program counter 的 OS，
 今天是 Windows 上的 x86_64。其他地方它回傳 false，`install(splice::live)` 會拒

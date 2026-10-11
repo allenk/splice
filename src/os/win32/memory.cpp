@@ -192,6 +192,23 @@ bool writable_protection(DWORD protect) {
 
 } // namespace
 
+bool is_readable(const void* addr, std::size_t size) noexcept {
+    if (addr == nullptr || size == 0) return false;
+
+    MEMORY_BASIC_INFORMATION info{};
+    if (::VirtualQuery(addr, &info, sizeof(info)) != sizeof(info)) return false;
+    if (info.State != MEM_COMMIT) return false;
+    if ((info.Protect & PAGE_NOACCESS) != 0 || (info.Protect & PAGE_GUARD) != 0) {
+        return false;
+    }
+    // One query describes one region, and a read that runs off the end of it
+    // can land anywhere, so a range that crosses out is reported unreadable
+    // rather than half-checked.
+    const auto base = reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+    const auto first = reinterpret_cast<std::uintptr_t>(addr);
+    return first + size <= base + info.RegionSize;
+}
+
 bool make_data_writable(void* addr, std::size_t size, DataProtection& saved) noexcept {
     if (addr == nullptr || size == 0) return false;
 

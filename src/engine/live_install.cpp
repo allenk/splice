@@ -20,6 +20,8 @@
 #include "live_install.h"
 
 #include "../os/memory.h"
+#include "install_lock.h"
+#include "patch_sites.h"
 
 #include <splice/log.h>
 
@@ -107,8 +109,38 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
     group->sites.resize(count);
     for (unsigned int i = 0; i < count; ++i) {
         auto& site = group->sites[i];
-        site.target = sites[i].target;
+
+        // The address a caller hands us is often not the function. An
+        // incremental-linked build routes a cross-translation-unit `&function`
+        // through an ILT thunk -- a bare `E9 rel32` -- and an import lands on
+        // an `FF 25` thunk; patching the thunk installs a hook almost nothing
+        // calls, and the planner refuses a jump as an unrelocatable prologue
+        // anyway. The single-site path has unwrapped since Phase 4; this one
+        // did not until a contention runner pointed it at a target in another
+        // translation unit and every install refused.
+        //
+        // It stops at anything splice itself wrote, which is the whole reason
+        // the site registry below has to be kept in step: an installed patch is
+        // an `E9` too, and following one walks into our own relay.
+        site.target = splice::engine::unwrap_jump_stub(sites[i].target);
         if (site.target == nullptr || sites[i].replacement == nullptr) {
+            restore_site_protection(*group);
+            delete group;
+            return refuse(LiveOperation::prepare_site, i, 0);
+        }
+
+        // Already ours. This check survives mutation, and that is the honest
+        // description of it: removing it changes nothing a test can see,
+        // because the planner refuses the same input one step later -- an
+        // installed `E9` is not a relocatable prologue. It stays because the
+        // two refusals do not mean the same thing to whoever reads the log.
+        // "Already patched by splice; chaining is not implemented" is a
+        // decision; "prologue not relocatable" is a measurement that happens
+        // to coincide with it, and would send the next reader looking at the
+        // wrong thing.
+        if (splice::engine::is_own_patch_site(site.target)) {
+            SPLICE_LOGE("splice_live_prepare: site %u at %p is already patched "
+                        "by splice; chaining is not implemented", i, site.target);
             restore_site_protection(*group);
             delete group;
             return refuse(LiveOperation::prepare_site, i, 0);
@@ -202,6 +234,16 @@ void splice_live_commit(void* handle, splice_patch_record* records_out,
         result = commit_group(*group, ops);
     }
 
+    if (result.state == LiveState::installed) {
+        // Register every site, for the same reason the single-site path does:
+        // the next install that unwraps a jump has to stop at ours instead of
+        // following it into the relay. splice_disable forgets the site when the
+        // original bytes go back.
+        for (auto& site : group->sites) {
+            splice::engine::remember_patched_site(site.target,
+                                                  site.plan.original());
+        }
+    }
     if (result.state == LiveState::installed && records_out != nullptr) {
         for (std::size_t i = 0; i < group->sites.size(); ++i) {
             auto& site = group->sites[i];

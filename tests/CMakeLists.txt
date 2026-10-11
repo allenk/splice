@@ -58,6 +58,8 @@ add_executable(splice_unit_test
     live/test_vtable_portable.cpp
     live/test_live_tier.cpp
     live/test_live_boundary.cpp
+    live/test_live_com_headless.cpp
+    live/test_live_contention.cpp
     stress_test.cpp
     helpers/test_targets.cpp
 )
@@ -86,6 +88,12 @@ set_target_properties(splice_vtable_provider PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
 target_link_libraries(splice_unit_test PRIVATE splice_vtable_provider)
+
+# The COM runner needs the task allocator and the module walk that proves its
+# vtable entries are in somebody else's image.
+if(WIN32)
+    target_link_libraries(splice_unit_test PRIVATE ole32 psapi)
+endif()
 
 # gtest_discover_tests runs the test binary on the host to enumerate cases.
 # Pointless (and broken) when cross-compiling for Android: the host would try

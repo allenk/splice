@@ -23,6 +23,7 @@
 #include <splice/engine.h>
 
 #include "install_lock.h"
+#include "patch_sites.h"
 #include "slot_patcher.h"
 #include "vtable_slot.h"
 
@@ -162,6 +163,10 @@ std::unordered_map<const void*, void*>& patched_sites() {
     return sites;
 }
 
+}  // namespace  -- the patch-site registry below is shared; see patch_sites.h
+
+namespace splice::engine {
+
 void remember_patched_site(const void* addr, void* routed_to) {
     if (addr == nullptr) return;
     const std::lock_guard<std::mutex> guard(patched_sites_mutex());
@@ -179,6 +184,10 @@ bool is_own_patch_site(const void* addr) {
     const std::lock_guard<std::mutex> guard(patched_sites_mutex());
     return patched_sites().count(addr) != 0;
 }
+
+} // namespace splice::engine
+
+namespace {
 
 // Where this address was routed, or nullptr if we have not patched it.
 void* patch_destination_of(const void* addr) {
@@ -209,16 +218,31 @@ void* patch_destination_of(const void* addr) {
 // second install used to fail harmlessly in emit_prologue_copy (walking 16
 // bytes off the end of a short function found something unrelocatable), so the
 // mis-targeting never got far enough to do damage.
+} // namespace
+
+namespace splice::engine {
+
 void* unwrap_jump_stub(void* target) {
 #if defined(SPLICE_HAS_X86_64_BACKEND)
     constexpr int kMaxDepth = 4;
     for (int depth = 0; depth < kMaxDepth && target != nullptr; ++depth) {
-        if (is_own_patch_site(target)) {
+        if (splice::engine::is_own_patch_site(target)) {
             SPLICE_LOGV("unwrap_jump_stub[%d]: %p is our own patch site; "
                         "stopping rather than following it",
                         depth, target);
             break;
         }
+        // Never decode bytes at an address a caller supplied without asking
+        // the OS whether they are there. An address that names nothing looks
+        // exactly like an address that names code until something reads it,
+        // and the answer to a bogus one is a refusal downstream, not a fault
+        // here. Six bytes is the longest form matched below.
+        if (!splice::os::is_readable(target, 6)) {
+            SPLICE_LOGV("unwrap_jump_stub[%d]: %p is not readable; leaving it "
+                        "to the caller to refuse", depth, target);
+            break;
+        }
+
         const auto* bytes = static_cast<const std::uint8_t*>(target);
 
         // E9 rel32 — relative near jump (MSVC ILT stub)
@@ -248,6 +272,10 @@ void* unwrap_jump_stub(void* target) {
 #endif
     return target;
 }
+
+} // namespace splice::engine
+
+namespace {
 
 // Installs are serialised against each other.
 //
@@ -289,7 +317,7 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
     const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
 
     // Follow one level of jump-stub indirection (MSVC ILT, DLL imports).
-    target_addr = unwrap_jump_stub(target_addr);
+    target_addr = splice::engine::unwrap_jump_stub(target_addr);
 
 #if defined(SPLICE_HAS_POSIX_HOOK)
     // Strategy 1 (POSIX): ELF GOT/PLT reverse — Tier 1 safe.
@@ -392,7 +420,7 @@ void* hook_by_address(void* target_addr, void* new_func, void** original_func,
         // unwrap may follow the jump we just wrote, and no second hook may be
         // stacked on it. Recorded whether or not the caller wanted a patch
         // record.
-        remember_patched_site(target_addr, new_func);
+        splice::engine::remember_patched_site(target_addr, new_func);
     }
     if (result != nullptr && out_record != nullptr) {
         out_record->strategy = SPLICE_PATCH_STRATEGY_INLINE;
@@ -430,7 +458,7 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
     if (target_addr == nullptr || new_func == nullptr || expected_bytes == nullptr ||
         expected_size != 16) return nullptr;
     const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
-    if (is_own_patch_site(target_addr)) return nullptr;
+    if (splice::engine::is_own_patch_site(target_addr)) return nullptr;
     unsigned char snapshot[16];
     std::memcpy(snapshot, expected_bytes, sizeof(snapshot));
     if (std::memcmp(target_addr, snapshot, sizeof(snapshot)) != 0) return nullptr;
@@ -438,14 +466,14 @@ void* splice_hook_address_strict_pre_rec(void* target_addr, void* new_func,
     // Reserve registry storage BEFORE publishing any target bytes. All other
     // installers in this instance are excluded by install_mutex. On refusal
     // nothing was published, so this provisional reservation is removed.
-    remember_patched_site(target_addr, new_func);
+    splice::engine::remember_patched_site(target_addr, new_func);
     splice_patch_record record{};
     void* original = nullptr;
     void* result = splice::arch::x86_64::install_inline_patch(
         target_addr, new_func, &original, pre_cb, pre_user,
         record.pre_hook_bytes, &record.pre_hook_byte_len, snapshot);
     if (result == nullptr) {
-        forget_patched_site(target_addr);
+        splice::engine::forget_patched_site(target_addr);
         return nullptr;
     }
     record.strategy = SPLICE_PATCH_STRATEGY_INLINE;
@@ -594,7 +622,7 @@ int splice_disable(const splice_patch_record* record) {
             // The original bytes are back, so this address is no longer one of
             // ours: a later install here is legitimate, and unwrap_jump_stub
             // should read the prologue at face value again.
-            forget_patched_site(target);
+            splice::engine::forget_patched_site(target);
 
             SPLICE_LOGI("Disabled (INLINE) at %p — trampoline %p leaked per FR-013",
                         target, record->trampoline);

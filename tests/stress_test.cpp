@@ -27,6 +27,7 @@
 #include <splice/splice.h>
 
 #include "helpers/test_targets.h"
+#include "helpers/test_env.h"
 
 #include <atomic>
 #include <chrono>
@@ -57,7 +58,7 @@ TEST(LiveHookStress, threads_invoke_during_atomic_install) {
     // So — exactly like the benchmarks (see docs/fr-010-performance-summary)
     // — this is a local / on-device gate, skipped on CI. Registry concurrency
     // stays covered on CI by the HookRegistry concurrent_readers/writers tests.
-    if (std::getenv("CI") != nullptr) {
+    if (splice::test::env_is_set("CI")) {
         GTEST_SKIP() << "live-patch XMC stress test skipped on shared CI "
                         "runners (oversubscribed); run locally or on-device";
     }

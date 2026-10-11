@@ -23,6 +23,7 @@
 
 #include <splice/live.h>
 
+#include "test_targets.h"
 #include "vtable_provider.h"
 
 #include <atomic>
@@ -229,6 +230,74 @@ TEST(LiveTierEverywhere, a_group_named_by_address_refuses_the_slot_swap_tier) {
 
     EXPECT_EQ(outcome.state(), splice::State::refused);
     EXPECT_EQ(outcome.installed_sites(), 0u);
+}
+
+TEST_F(LiveTier, a_target_behind_a_jump_thunk_is_patched_through_it) {
+    // `&contention_target_a` is in another translation unit, so under
+    // incremental linking the address a caller gets is an ILT thunk -- a bare
+    // `E9 rel32` -- not the function. Patching the thunk installs a hook
+    // almost nothing calls, and the planner refuses a jump as an unrelocatable
+    // prologue, so the whole install fails.
+    //
+    // This is the case that was broken until a contention runner found it: the
+    // single-site path has unwrapped since Phase 4, the group did not. In a
+    // non-incremental build the address may already be the function, which is
+    // why the assertion is on the install succeeding rather than on the bytes
+    // -- it has to pass either way, and fail if the unwrap goes.
+    static std::atomic<int> hits{0};
+    hits.store(0);
+
+    splice::Live<> group;
+    m_outcome = group
+        .at(reinterpret_cast<void*>(&splice::test::contention_target_a), PlainFn{},
+            [](auto orig, int x) {
+                hits.fetch_add(1);
+                return orig(x) + 1;
+            })
+        .install(splice::live);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed)
+        << "stage=" << static_cast<int>(m_outcome.failure().stage)
+        << " op=" << static_cast<int>(m_outcome.failure().operation);
+    EXPECT_EQ(splice::test::contention_target_a(5), 16);   // 5*3 then +1
+    EXPECT_EQ(hits.load(), 1);
+}
+
+TEST_F(LiveTier, a_second_live_install_on_the_same_function_is_refused) {
+    // An installed patch is an `E9` too, so a second install that followed it
+    // would walk into splice's own relay and patch whatever the hook stub
+    // begins with -- observed once already, with a stack overflow. The site
+    // registry is what stops it, and this is the test that says the group keeps
+    // that registry in step rather than only reading it.
+    static std::atomic<int> hits{0};
+    hits.store(0);
+
+    splice::Live<> first;
+    m_outcome = first
+        .at(reinterpret_cast<void*>(&splice::test::contention_target_b), PlainFn{},
+            [](auto orig, int x) {
+                hits.fetch_add(1);
+                return orig(x) + 1;
+            })
+        .install(splice::live);
+    ASSERT_EQ(m_outcome.state(), splice::State::installed);
+    ASSERT_EQ(splice::test::contention_target_b(2), 11);   // 2*5 then +1
+
+    splice::Live<> second;
+    splice::Outcome again = second
+        .at(reinterpret_cast<void*>(&splice::test::contention_target_b), PlainFn{},
+            [](auto orig, int x) { return orig(x) + 100; })
+        .install(splice::live);
+
+    EXPECT_EQ(again.state(), splice::State::refused);
+    EXPECT_EQ(again.failure().stage, splice::Stage::prepare);
+    EXPECT_EQ(again.installed_sites(), 0u);
+
+    // The first hook is untouched, which is the property that matters: a
+    // rejected install must not damage the one already there.
+    const int before = hits.load();
+    EXPECT_EQ(splice::test::contention_target_b(2), 11);
+    EXPECT_EQ(hits.load(), before + 1);
 }
 
 TEST_F(LiveTier, an_address_that_is_not_mapped_code_is_refused_not_read) {

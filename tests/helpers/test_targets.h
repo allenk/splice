@@ -59,6 +59,14 @@ SPLICE_TEST_NOINLINE int policy_target_b(int x);
 SPLICE_TEST_NOINLINE int reentry_refusal_target(int x);
 SPLICE_TEST_NOINLINE int reentry_control_target(int x);
 
+// Dedicated contention targets for the coordinated tier. Two of them, because
+// the point of a group is that several sites are written together, and one site
+// cannot show that. Same isolation reasoning as stress_target: these are
+// installed and disabled repeatedly while threads call them, so they must not
+// be a function any other test has an opinion about.
+SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_a(int x);
+SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_b(int x);
+
 // ARM64 S-01: a target whose prologue really does contain a PC-relative address
 // computation, so the relocation budget that decides whether ARM64 can be hooked
 // at all is actually exercised.

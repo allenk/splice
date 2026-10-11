@@ -176,6 +176,18 @@ coordinates nothing, so there is nothing to go wrong. Reach for `splice::live`
 when the slot is contested -- when something else may swap the same pointer and
 you need to be in the call chain regardless.
 
+Two behaviours of the coordinated tier worth knowing before you hand it an
+address:
+
+- **It follows jump thunks.** `&function` for a function in another
+  translation unit is often an ILT thunk under incremental linking, and an
+  import is a thunk too. The tier patches the function behind them, which is
+  what you meant.
+- **A second install on the same function is refused.** An installed patch is a
+  jump as well, so chaining onto one would walk into splice's own relay.
+  Chaining is a real feature and a design question; until it is answered, the
+  honest answer is no.
+
 `splice::live_tier_available()` says whether the tier can run at all on this
 build: it needs an architecture whose prologue can be planned and an OS that
 can suspend a thread and move its program counter, which today means x86_64 on

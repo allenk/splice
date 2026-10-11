@@ -49,6 +49,18 @@ All notable changes to Splice are documented here. Format follows
     it can run on a build at all; it needs an architecture whose prologue can be
     planned and an OS that can suspend a thread, which today means x86_64 on
     Windows.
+  - **It follows jump thunks**, like the single-site path has since Phase 4. An
+    incremental-linked build routes a cross-translation-unit `&function`
+    through an ILT thunk -- a bare `E9 rel32` -- and an import lands on an
+    `FF 25` thunk; patching the thunk installs a hook almost nothing calls, and
+    the planner refuses a jump as an unrelocatable prologue, so the install
+    fails outright. Found by pointing a contention runner at a target in
+    another translation unit, where every install refused.
+  - **A second install on the same function is refused**, not chained. The
+    group registers what it patched, so the next unwrap stops at splice's own
+    jump instead of walking into the relay behind it -- which, before the
+    registry existed, meant patching splice's own relay and overflowing the
+    stack.
   - `splice_live_prepare` / `splice_live_commit` / `splice_live_release` on the
     C ABI, split in three because of what may happen when: prepare does every
     allocation, opens every thread reference and makes every target writable,
@@ -78,6 +90,13 @@ All notable changes to Splice are documented here. Format follows
   implementations call one another. Nested calls do not consult `.when()` and
   do not spend a budget. Up to 64 scopes per process; a hook asked to use a
   scope that could not be reserved refuses to install.
+
+### Fixed
+- An address that names nothing is now refused instead of faulting. Following a
+  jump thunk means decoding the bytes at an address the caller supplied, and
+  nothing asked the OS whether they were there; `splice::os::is_readable` is
+  consulted first, at every hop. This affects every install path that unwraps,
+  including the single-site ones that have done so since Phase 4.
 
 ## [1.1.0] - 2026-10-06
 

@@ -96,6 +96,14 @@ struct DataProtection {
     bool           changed  = false;
 };
 
+// Does [addr, addr+size) lie in committed, readable memory?
+//
+// For asking before decoding bytes at an address a caller supplied. Nothing
+// above the OS can answer it, and the alternative to asking is a fault: an
+// address that names nothing looks exactly like an address that names code
+// until something reads it.
+[[nodiscard]] bool is_readable(const void* addr, std::size_t size) noexcept;
+
 // Make [addr, addr+size) writable, recording what to put back. Returns false
 // and leaves `saved` untouched when the range cannot be made writable, or when
 // its current protection cannot be determined -- splice would rather refuse a
