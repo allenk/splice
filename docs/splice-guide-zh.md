@@ -77,9 +77,15 @@ splice::install_all();   // 一次 commit 所有 hook
 // 5. 一次性 / N 次性
 .once()
 .times(5)
+
+// 6. 重入閘 — 同一執行緒上的巢狀呼叫直接走原函式
+.non_reentrant()                 // 只管這個 hook：處理直接遞迴
+.non_reentrant(scope)            // 與兄弟 hook 共用：splice::Reentrancy scope;
 ```
 
-`.when` / `.once` / `.times` 可跟 `.onInvoke` / `.before` / `.after` **任意組合**。`onInvoke` / `before` / `after` 三者**互斥**（最後設定的覆蓋之前）。
+`.when` / `.once` / `.times` / `.non_reentrant` 可跟 `.onInvoke` / `.before` / `.after` **任意組合**。`onInvoke` / `before` / `after` 三者**互斥**（最後設定的覆蓋之前）。
+
+`.non_reentrant(scope)` 用在互相呼叫的方法上。被 hook 的方法實作裡又呼叫另一個被 hook 的方法（例如 `Present1` 內部呼叫 `Present`），巢狀呼叫是從*另一個* hook 進來的，只在單一 hook 上設閘看不到它。共用同一個 `splice::Reentrancy` 的所有 hook，只要其中任一個正在該執行緒上執行，其他的就直接走原函式。巢狀呼叫不是新的呼叫，所以不會詢問 `.when()`，也不消耗 `.once()` / `.times(n)` 的次數。代價是每次呼叫一次 thread-local 讀取，與手寫 `thread_local` 旗標相同。一個 process 同時最多 64 個 scope；要求使用無法保留的 scope 的 hook 會拒絕安裝。
 
 ### 3.3 診斷一行語法糖
 
@@ -175,7 +181,7 @@ cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
 | **`disable()` ≠ uninstall** | Tier 2 inline disable 還原 prologue 但 trampoline JIT 記憶體 leak（一輩子，bounded by hook 數量） |
 | **rcu_writeonce 是 write-once-leak** | 每次 `set_invoke` allocate 一個 `std::function`，舊的不回收。Splice 預期 callback set 一次就不變 |
 | **RCU registry 限 SPLICE_MAX_HOOKS** | 預設 512，硬上限。超過要 rebuild |
-| **不支援 hook callback 內遞迴呼叫同一 hook** | 會 infinite loop（用 `.when(false)` gate 自己跳過）|
+| **hook callback 內遞迴呼叫同一 hook 會重入** | 巢狀呼叫會再進入 hook；`.non_reentrant()` 讓巢狀呼叫直接走原函式 |
 | **`__COUNTER__` ID 系統** | 已修為 `__LINE__ << 16 \| __COUNTER__`，理論上兩個 TU 同行 + 同 counter 仍會撞（機率極低）|
 | **不保證 callback 順序** | 同 target 多次 hook（不該這樣做）行為未定義 |
 
@@ -240,7 +246,8 @@ auto& entry = SPLICE_HOOK(func)
   | .after(lambda)             // 之後
   | .when(predicate)            // 條件
   | .once()                     // 一次
-  | .times(n);                  // N 次
+  | .times(n)                   // N 次
+  | .non_reentrant([scope]);    // 巢狀呼叫走原函式
 
 entry.is_installed();           // 查狀態
 entry.disable();                // 觸發 disable
@@ -363,7 +370,7 @@ SPLICE_HOOK(printf).onInvoke([](auto orig, const char* fmt, ...) {
 });
 ```
 
-如果一定要：用 thread_local 旗標 + `.when()` gate 跳過。
+如果一定要：加上 `.non_reentrant()`，巢狀呼叫就會直接走原函式，不再回到 callback。若巢狀呼叫進入的是*兄弟* hook 而非同一個，讓兩者共用同一個 `splice::Reentrancy` scope。
 
 ### 9.3 `recursive_mutex` 風險
 

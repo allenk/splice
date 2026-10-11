@@ -6,6 +6,15 @@ All notable changes to Splice are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- `.non_reentrant()` and `.non_reentrant(scope)`, a gate alongside `.when()`,
+  `.once()` and `.times(n)`: while a callback runs on a thread, a nested call
+  that reaches a hook of the same scope goes straight to the original. A
+  `splice::Reentrancy` scope can be shared by sibling hooks, for methods whose
+  implementations call one another. Nested calls do not consult `.when()` and
+  do not spend a budget. Up to 64 scopes per process; a hook asked to use a
+  scope that could not be reserved refuses to install.
+
 ## [1.1.0] - 2026-10-06
 
 Splice's first release driven by a consumer outside its own tests:

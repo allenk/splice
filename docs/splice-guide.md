@@ -82,12 +82,26 @@ The engine tries POINTER_SWAP first, falls back to INLINE on failure.
 // 5. One-shot / N-shot
 .once()
 .times(5)
+
+// 6. Re-entrancy gate — a nested call on the same thread goes to the original
+.non_reentrant()                 // this hook alone: covers direct recursion
+.non_reentrant(scope)            // shared with sibling hooks: splice::Reentrancy scope;
 ```
 
-`.when` / `.once` / `.times` **compose freely** with `.onInvoke` /
-`.before` / `.after`. The three action verbs (`onInvoke` / `before` /
-`after`) are **mutually exclusive** — the last one set overwrites the
-previous.
+`.when` / `.once` / `.times` / `.non_reentrant` **compose freely** with
+`.onInvoke` / `.before` / `.after`. The three action verbs (`onInvoke` /
+`before` / `after`) are **mutually exclusive** — the last one set overwrites
+the previous.
+
+`.non_reentrant(scope)` is for methods that call each other. When one hooked
+method's implementation calls another hooked method — a `Present1` that calls
+`Present`, say — the nested call arrives through a *different* hook, so a gate
+on one hook alone does not see it. Every hook that shares a `splice::Reentrancy`
+is skipped while any of them is running on the thread. A nested call does not
+consult `.when()` and does not spend a `.once()` / `.times(n)` budget, because it
+is not a new call. The cost is one thread-local load per call, which is what a
+hand-written `thread_local` flag costs. A process can hold 64 scopes at once; a
+hook asked to use a scope that could not be reserved refuses to install.
 
 ### 3.3 Diagnostic one-liners
 
@@ -209,7 +223,7 @@ cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
 | **`disable()` ≠ uninstall** | Tier 2 inline disable restores the prologue but trampoline JIT memory leaks (forever, bounded by hook count) |
 | **rcu_writeonce is write-once-leak** | Every `set_invoke` allocates a fresh `std::function`; old ones are not reclaimed. Splice assumes callbacks are set once and stay |
 | **RCU registry is capped at SPLICE_MAX_HOOKS** | Default 512; hard limit. Rebuild to raise |
-| **Recursive hook callbacks deadlock** | Calling the same hooked function inside its callback infinite-loops (use `.when(false)` to gate yourself out) |
+| **Recursive hook callbacks recurse** | Calling the same hooked function inside its callback re-enters the hook; `.non_reentrant()` sends the nested call to the original |
 | **`__COUNTER__` ID system** | Fixed to `__LINE__ << 16 \| __COUNTER__`; in theory two TUs on the same line with the same counter would still collide (probability << 10⁻⁶) |
 | **No guarantee on callback ordering** | Multiple hooks on the same target (which you should not do) have undefined behaviour |
 
@@ -276,7 +290,8 @@ auto& entry = SPLICE_HOOK(func)
   | .after(lambda)             // after
   | .when(predicate)            // gate
   | .once()                     // one-shot
-  | .times(n);                  // N-shot
+  | .times(n)                   // N-shot
+  | .non_reentrant([scope]);    // nested calls go to the original
 
 entry.is_installed();           // query
 entry.disable();                // trigger disable
@@ -411,8 +426,10 @@ SPLICE_HOOK(printf).onInvoke([](auto orig, const char* fmt, ...) {
 });
 ```
 
-If you really must: use a `thread_local` flag + `.when()` gate to skip
-yourself.
+If you really must, add `.non_reentrant()`: the nested call then goes to the
+original instead of back into the callback. When the nested call reaches a
+*sibling* hook rather than the same one, give both the same
+`splice::Reentrancy` scope.
 
 ### 9.3 Locking hazards
 

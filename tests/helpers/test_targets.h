@@ -53,6 +53,12 @@ SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int stress_target(int x);
 SPLICE_TEST_NOINLINE int policy_target_a(int x);
 SPLICE_TEST_NOINLINE int policy_target_b(int x);
 
+// Dedicated re-entrancy targets: one hook that must refuse to install, and an
+// equivalent one that must install, so the refusal is attributable to the scope.
+// Different bodies, so identical-code folding cannot make them one address.
+SPLICE_TEST_NOINLINE int reentry_refusal_target(int x);
+SPLICE_TEST_NOINLINE int reentry_control_target(int x);
+
 // ARM64 S-01: a target whose prologue really does contain a PC-relative address
 // computation, so the relocation budget that decides whether ARM64 can be hooked
 // at all is actually exercised.

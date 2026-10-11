@@ -83,6 +83,12 @@ SPLICE_HOOK(engine_init)
     .once()                                   // fire exactly once, then transparent
     .after([]{ SPLICE_LOGI("engine up"); });
 // .when().once() == .once().when() — order doesn't matter.
+
+// Methods that call each other: inside one callback, the sibling goes straight
+// to the original on that thread — no double work, no recursion.
+static splice::Reentrancy present_family;
+SPLICE_HOOK_ADDR(present_addr,  Present_t).non_reentrant(present_family).before(draw_overlay);
+SPLICE_HOOK_ADDR(present1_addr, Present1_t).non_reentrant(present_family).before(draw_overlay1);
 ```
 
 **Hook a C++ member function — `this` becomes the first explicit arg:**

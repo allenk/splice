@@ -6,6 +6,7 @@
 //   <splice/log.h>        — logging substrate + hot-path variants
 //   <splice/macros.h>     — SPLICE_HOOK*, SPLICE_HOOK_STATIC, SPLICE_HOOK_ADDR
 //   <splice/core.h>       — InterceptorEntry<>
+//   <splice/reentrancy.h> — Reentrancy, the scope behind .non_reentrant()
 //   <splice/registry.h>   — IdRegistry, HookManager, OriginalRegistry
 //   <splice/traits.h>     — function_traits<>
 //   <splice/trampoline.h> — TrampolineGenerator<>
@@ -22,6 +23,7 @@
 #include <splice/engine.h>
 #include <splice/log.h>
 #include <splice/macros.h>
+#include <splice/reentrancy.h>
 #include <splice/registry.h>
 #include <splice/traits.h>
 #include <splice/trampoline.h>

@@ -17,6 +17,7 @@
 #include <splice/engine.h>
 #include <splice/log.h>
 #include <splice/policy.h>
+#include <splice/reentrancy.h>
 #include <splice/registry.h>
 #include <splice/traits.h>
 #include <splice/trampoline.h>
@@ -173,6 +174,30 @@ public:
         return *this;
     }
 
+    // .non_reentrant() — while this hook's callback runs on a thread, a nested
+    // call to it on the same thread goes straight to the original. Covers
+    // direct recursion. A nested call is not a new call to decide about: it
+    // does not consult .when() and does not spend a .once() / .times(n)
+    // budget. See <splice/reentrancy.h>.
+    InterceptorEntry& non_reentrant() {
+        auto scope = std::make_shared<Reentrancy>();
+        m_pending_gates.reentry_bit = scope->bit();
+        m_pending_gates.owned_scope = std::move(scope);
+        m_pending_gates.reentry_requested = true;
+        return *this;
+    }
+
+    // .non_reentrant(scope) — share a scope with other hooks, so that a call
+    // reaching this hook from inside any of them, on the same thread, goes
+    // straight to the original. This is the form for methods that delegate to
+    // one another. The scope must outlive the hook.
+    InterceptorEntry& non_reentrant(const Reentrancy& scope) {
+        m_pending_gates.reentry_bit = scope.bit();
+        m_pending_gates.owned_scope.reset();
+        m_pending_gates.reentry_requested = true;
+        return *this;
+    }
+
     // .observe() — count how many times the patched function was actually
     // entered, readable afterwards through invocations().
     //
@@ -282,6 +307,11 @@ private:
     }
 
     void install() {
+        if (m_refused) {
+            SPLICE_LOGE("Hook install REFUSED: %s::%s — no re-entrancy scope was available",
+                        m_lib.c_str(), m_sym.c_str());
+            return;
+        }
         PrePatchCtx ctx{this};
         void* stub = splice_hook_symbol_pre_rec(m_lib.c_str(), m_sym.c_str(),
                                                 m_trampoline_ptr,
@@ -300,6 +330,11 @@ private:
     void install_direct() {
         if (m_direct_addr == nullptr) {
             SPLICE_LOGE("install_direct: no address provided");
+            return;
+        }
+        if (m_refused) {
+            SPLICE_LOGE("Hook install REFUSED (direct): %p — no re-entrancy scope was available",
+                        m_direct_addr);
             return;
         }
         PrePatchCtx ctx{this};
@@ -323,6 +358,9 @@ private:
         std::function<bool()>                   when_pred;
         std::shared_ptr<std::atomic<long long>> remaining;   // shared with lambda
         std::shared_ptr<std::atomic<std::uint64_t>> invocations;  // .observe()
+        std::uint64_t               reentry_bit = 0;          // .non_reentrant()
+        std::shared_ptr<Reentrancy> owned_scope;              // the no-argument form
+        bool                        reentry_requested = false;
     };
     PendingGates m_pending_gates;
     // Kept on the entry, not only in the gates: commit_with_gates clears
@@ -339,7 +377,18 @@ private:
         PendingGates gates = std::move(m_pending_gates);
         m_pending_gates = {};
 
-        if (!gates.when_pred && !gates.remaining && !gates.invocations) {
+        // Asked for a scope and none was available: commit nothing and refuse
+        // to install. Installing without the protection that was asked for is
+        // the double run, or the recursion, the caller was preventing.
+        m_refused = gates.reentry_requested && gates.reentry_bit == 0;
+        if (m_refused) {
+            SPLICE_LOGE("non_reentrant: no re-entrancy scope available (64 in use); "
+                        "this hook will not install (id=%d)", m_unique_id);
+            return;
+        }
+
+        if (!gates.when_pred && !gates.remaining && !gates.invocations &&
+            !gates.reentry_requested) {
             // Fast path — no gates, store the lambda as-is.
             HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
                 .set_invoke(std::move(fn));
@@ -356,22 +405,37 @@ private:
             if (gates.invocations) {
                 gates.invocations->fetch_add(1, std::memory_order_relaxed);
             }
-            if (gates.when_pred && !gates.when_pred()) {
-                return orig(args...);
-            }
-            if (gates.remaining) {
-                // fetch_sub returns the value BEFORE decrement. Fire only
-                // while the budget is positive. The counter keeps ticking
-                // down past zero (harmless — bounded by call count).
-                if (gates.remaining->fetch_sub(1, std::memory_order_acq_rel) <= 0) {
+            // Ahead of .when() and the budget: a nested call is not a new call
+            // to decide about.
+            if (gates.reentry_bit != 0) {
+                if (detail::reentered(gates.reentry_bit)) {
                     return orig(args...);
                 }
+                detail::ReentryHold hold(gates.reentry_bit);
+                return run_gated(gates, fn, orig, args...);
             }
-            return fn(orig, args...);
+            return run_gated(gates, fn, orig, args...);
         };
 
         HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
             .set_invoke(std::move(wrapped));
+    }
+
+    template <typename InvokeFn>
+    static Ret run_gated(const PendingGates& gates, const InvokeFn& fn,
+                         FuncType orig, Args... args) {
+        if (gates.when_pred && !gates.when_pred()) {
+            return orig(args...);
+        }
+        if (gates.remaining) {
+            // fetch_sub returns the value BEFORE decrement. Fire only
+            // while the budget is positive. The counter keeps ticking
+            // down past zero (harmless — bounded by call count).
+            if (gates.remaining->fetch_sub(1, std::memory_order_acq_rel) <= 0) {
+                return orig(args...);
+            }
+        }
+        return fn(orig, args...);
     }
 
     std::string m_lib;
@@ -384,6 +448,7 @@ private:
     void* m_direct_addr;
     splice_patch_record m_record{};   // populated on install, consumed by disable
     bool m_installed = false;          // true between successful install() and disable()
+    bool m_refused = false;            // .non_reentrant() asked for a scope none could give
     InstallerToken m_installer_token;  // RAII handle into HookContext's installer queue
 };
 
