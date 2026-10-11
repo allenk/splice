@@ -56,6 +56,7 @@ TEST(PrologueFacts, a_five_byte_entry_has_no_interior_boundary) {
     EXPECT_EQ(facts.patch_bytes, 5u);
     EXPECT_EQ(facts.interior_boundaries, 0u)
         << "a window that is one instruction cannot have a boundary inside it";
+    EXPECT_EQ(facts.interior_mask, 0u) << "no boundaries, so no bits";
 }
 
 TEST(PrologueFacts, a_short_entry_puts_a_boundary_inside_the_window) {
@@ -65,6 +66,8 @@ TEST(PrologueFacts, a_short_entry_puts_a_boundary_inside_the_window) {
     EXPECT_EQ(facts.patch_bytes, 6u) << "five bytes rounded up to whole instructions";
     EXPECT_EQ(facts.interior_boundaries, 1u)
         << "the second instruction starts at offset 3, inside the window";
+    EXPECT_EQ(facts.interior_mask, 1u << 3)
+        << "and the mask has to say where, not just how many";
 }
 
 TEST(PrologueFacts, the_window_is_always_whole_instructions_and_covers_the_patch) {
@@ -78,6 +81,13 @@ TEST(PrologueFacts, the_window_is_always_whole_instructions_and_covers_the_patch
         << "the window cannot be shorter than its first instruction";
     EXPECT_EQ(facts.interior_boundaries == 0u, facts.patch_bytes == facts.first_instruction)
         << "no interior boundary is the same statement as one instruction";
+    EXPECT_EQ(facts.interior_boundaries == 0u, facts.interior_mask == 0u)
+        << "the count and the positions have to agree";
+    EXPECT_EQ(facts.interior_mask & 1u, 0u) << "the entry is not an interior boundary";
+    if (facts.interior_boundaries != 0u) {
+        EXPECT_NE(facts.interior_mask & (1u << facts.first_instruction), 0u)
+            << "the first interior boundary is where the first instruction ends";
+    }
 }
 
 TEST(PrologueFacts, a_thunk_is_followed_so_the_facts_describe_the_function) {

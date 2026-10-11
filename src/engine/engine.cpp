@@ -566,20 +566,25 @@ int splice_prologue_profile(const void* target, splice_prologue_facts* out) {
     // Walk the window and count the starts inside it. The entry is not an
     // interior boundary and neither is the first byte past the window.
     unsigned int interior = 0;
+    unsigned int mask = 0;
     std::size_t offset = 0;
     while (offset < patch) {
         const auto info = analyze_instruction(bytes + offset, kWalk - offset);
         if (info.length == 0 || info.type == InstructionType::Unknown) return -1;
         offset += info.length;
-        if (offset < patch) ++interior;
+        if (offset < patch) {
+            ++interior;
+            mask |= 1u << offset;
+        }
     }
 
     out->patch_bytes = static_cast<unsigned int>(patch);
     out->first_instruction = first.length;
     out->interior_boundaries = interior;
-    SPLICE_LOGV("splice_prologue_profile: %p patch=%u first=%u interior=%u",
+    out->interior_mask = mask;
+    SPLICE_LOGV("splice_prologue_profile: %p patch=%u first=%u interior=%u mask=0x%x",
                 resolved, out->patch_bytes, out->first_instruction,
-                out->interior_boundaries);
+                out->interior_boundaries, out->interior_mask);
     return 0;
 #else
     SPLICE_LOGW_ONCE("splice_prologue_profile: no prologue decoder on this architecture");

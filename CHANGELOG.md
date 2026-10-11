@@ -116,7 +116,7 @@ All notable changes to Splice are documented here. Format follows
 - `splice_prologue_profile` on the C ABI, reporting what a coordinated
   install would replace at a target: the patch window, the length of the
   instruction at the entry, and how many instruction starts lie strictly
-  inside the window. Zero interior boundaries means no thread can be *inside*
+  inside the window and where they are. Zero interior boundaries means no thread can be *inside*
   the bytes being replaced -- it is either at the entry or past all of them.
   It decodes and writes nothing, and follows a jump thunk first so the facts
   describe the function rather than the thunk in front of it.

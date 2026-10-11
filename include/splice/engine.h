@@ -179,6 +179,12 @@ typedef struct {
     // the window is exactly one instruction, so no thread can be *inside* the
     // bytes being replaced -- it is either at the entry or past all of them.
     unsigned int interior_boundaries;
+    // Where they are: bit N is set when an instruction starts at offset N
+    // inside the window. Bit 0 is never set, because the entry is not an
+    // interior boundary. A count answers an admission rule; the positions are
+    // what gets written into a refusal's evidence, and a consumer that had
+    // both before should not lose one of them to a nicer API.
+    unsigned int interior_mask;
 } splice_prologue_facts;
 
 // Fills `out` and returns 0 when the prologue at `target` decodes; returns -1
