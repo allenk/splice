@@ -1,10 +1,34 @@
 # EditorConfig — Splice C++ project
 # https://editorconfig.org
 #
-# Mirrors the rules in .clang-format and .cpp-style.yaml so editors
-# without clang-format integration still indent and trim correctly.
-# Vendored code under third_party/ is exempt — preserve upstream
-# formatting verbatim per the "do not modify in-place" convention.
+# This file is the mechanical half of the project's layout convention —
+# indent, end-of-line, trailing whitespace, final newline — so an editor
+# enforces it without anyone having to remember it.
+#
+# It does NOT derive from .clang-format, and .clang-format is not the rule.
+# Splice's C++ was laid out by hand and differs from that configuration on
+# roughly 18 % of lines, so the formatter is a reference tool and is never
+# run over existing files. The rest of the convention, which no formatter
+# checks, is:
+#
+#   * 100 columns, 4-space indent, braces attached.
+#   * A blank line between definitions — functions, classes, structs, and
+#     member functions with multi-line bodies. Accessor-sized one-liners may
+#     sit together.
+#   * One statement per line. A one-line guard clause (`if (x) return;`) is
+#     the existing style; a block with two statements is not.
+#   * Includes stay in the order the file already uses.
+#   * Pointer and reference bind left: `const char* p`, not `const char *p`.
+#   * A layout fix is whitespace-only and goes in its own commit, never
+#     mixed with a behaviour change.
+#
+# Naming is separate and is not expressible here: types PascalCase,
+# constants kPascalCase, everything else snake_case, and m_ on the members
+# of a class that has a private section and owns resources. Type traits and
+# policy tags spell themselves the way the standard library spells them.
+#
+# Vendored code is exempt from reflowing but not from byte discipline — see
+# the last section.
 
 root = true
 
@@ -16,7 +40,7 @@ indent_style = space
 indent_size = 4
 insert_final_newline = true
 trim_trailing_whitespace = true
-max_line_length = 100              # matches .clang-format ColumnLimit
+max_line_length = 100
 
 # ─── C / C++ ──────────────────────────────────────────────────────────────
 [*.{c,h,cc,cpp,hpp,cxx,hxx,inl,ipp,inc}]
@@ -44,11 +68,11 @@ indent_size = 4
 [*.ps1]
 indent_size = 4
 # pwsh 7+ accepts LF natively; default end_of_line = lf is fine.
-
-# ─── Windows command scripts (require CRLF) ──────────────────────────────
-[*.{bat,cmd}]
-indent_size = 4
-end_of_line = crlf
+#
+# Windows command scripts once had a section here asking for CRLF. The tree
+# carries no .bat or .cmd file, and the convention for tracked text is
+# LF-only, so a rule granting an exception nothing needed was removed rather
+# than left for whoever adds the first one to discover.
 
 # ─── Python helper scripts ────────────────────────────────────────────────
 [*.py]
@@ -60,12 +84,21 @@ max_line_length = 100
 indent_style = tab
 
 # ─── Vendored / third-party — preserve upstream formatting ───────────────
-# `*-vendor` glob lets vcpkg / submodule mirrors share this fall-through.
-[{third_party/**,*-vendor/**,vcpkg_installed/**}]
+#
+# Layout is upstream's and must not be reflowed; the shared logging header
+# is maintained elsewhere and re-vendored, never edited in place. Byte
+# discipline is ours and still applies, so end_of_line and charset stay
+# pinned rather than unset: every file matched here is LF and BOM-free
+# today, and an editor should not be told it may change that.
+#
+# platform_log.h is named explicitly because it lives in include/, outside
+# any third_party glob — which is exactly where an exemption written as a
+# directory pattern misses it.
+[{third_party/**,*-vendor/**,vcpkg_installed/**,include/splice/detail/platform_log.h}]
 indent_style = unset
 indent_size = unset
 trim_trailing_whitespace = unset
 insert_final_newline = unset
-end_of_line = unset
 max_line_length = unset
-charset = unset
+end_of_line = lf
+charset = utf-8

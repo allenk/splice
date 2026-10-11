@@ -1,5 +1,19 @@
-# Splice C++ formatting — derived from Google, 4-space indent, 100 cols.
-# Matches .cpp-style.yaml naming rules (3+1, m_snake_case).
+# Splice C++ formatting — ADVISORY. This file is not the rule.
+#
+# Splice's C++ was laid out by hand, and it differs from this configuration
+# on roughly 18 % of lines: wrapping, one-line guard clauses, include order.
+# So this file is a reference for a new file or an unfamiliar construct, and
+# it is NEVER run over existing files — doing so would reformat the whole
+# project to match a configuration nobody wrote the code against. The layout
+# convention itself, in prose, is in .editorconfig's header.
+#
+# Kept rather than deleted because it answers "what would a formatter do
+# here". The three settings that used to contradict the hand convention
+# outright have been corrected below, so running it by accident no longer
+# reorders includes or unwraps a guard clause.
+#
+# Derived from Google, 4-space indent, 100 cols. Naming is a separate
+# convention and no formatter can check it.
 BasedOnStyle: Google
 Language: Cpp
 Standard: c++20
@@ -23,7 +37,7 @@ FixNamespaceComments: true
 CompactNamespaces: false
 
 AllowShortFunctionsOnASingleLine: Inline
-AllowShortIfStatementsOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: WithoutElse   # if (x) return; is the existing style
 AllowShortLoopsOnASingleLine: false
 AllowShortCaseLabelsOnASingleLine: false
 
@@ -36,7 +50,9 @@ BreakBeforeBraces: Attach
 BreakConstructorInitializers: BeforeColon
 BreakInheritanceList: BeforeColon
 
-IncludeBlocks: Regroup
+IncludeBlocks: Preserve           # keep the grouping the file already uses
+# Inert while SortIncludes is Never. Kept as the answer to "what order would
+# a formatter choose", not as an instruction to reorder anything.
 IncludeCategories:
   - Regex: '^<splice/'
     Priority: 1
@@ -47,7 +63,7 @@ IncludeCategories:
   - Regex: '^<.*>'
     Priority: 4
 
-SortIncludes: CaseSensitive
+SortIncludes: Never               # includes stay in the order the file uses
 SortUsingDeclarations: true
 
 SpacesBeforeTrailingComments: 2
