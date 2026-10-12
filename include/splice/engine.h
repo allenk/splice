@@ -70,9 +70,12 @@ void* splice_hook_symbol_pre(const char* lib_name,
 
 // ─── Disable / FR-013 Tiered Semantics ────────────────────────────────────
 //
-// Splice's threat model (in-process, non-privileged, no ptrace) makes
-// true reversible uninstall architecturally impossible. Instead we offer
-// **disable** in two tiers, named to make the limit visible:
+// Splice's threat model -- in-process, non-privileged, no ptrace -- is what
+// rules out true reversible uninstall. Not a law of nature: reclaiming the
+// memory needs proof that no thread is executing inside it, and that proof
+// needs either an exclusion protocol this library does not have or privileges
+// it does not assume. Both are scope decisions. What is offered instead is
+// **disable**, in two tiers, named to make the limit visible:
 //
 //   Tier 1 — POINTER_SWAP    (GOT / IAT / vtable slot)
 //     Atomic pointer-sized write of the original back into the slot.
@@ -85,8 +88,9 @@ void* splice_hook_symbol_pre(const char* lib_name,
 //     trade-off as ShadowHook's lazy cleanup. Documented limitation.
 //
 //   Tier 3 — true reversible uninstall with memory reclaim:
-//     NOT IMPLEMENTED, by design. Requires ptrace / stop-the-world,
-//     which an in-process non-privileged hook does not have. See the
+//     NOT IMPLEMENTED, by design, and the reason is a scope decision rather
+//     than an impossibility: it needs a thread exclusion protocol or
+//     privileges an in-process non-privileged hook does not assume. See the
 //     README's "What Splice does not do" and docs/splice-guide.md.
 
 // Strategy used by an installed hook. Filled in by `splice_hook_*_pre`
