@@ -257,14 +257,16 @@ int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
 // ─── The coordinated tier: a group of inline patches, one suspension ──────
 //
 // Two calls, and the split is the contract. `prepare` does every allocation,
-// opens every thread reference and makes every target writable; `commit`
+// opens a reference to every thread the OS names and makes every target
+// writable; `commit`
 // suspends, writes and resumes. In between, the caller publishes whatever a
 // reader will need behind the new code -- the original function pointer and
 // the callback -- because doing that inside the suspension would mean taking a
 // lock while another thread is suspended, which is how a process stops.
 //
 // Why a group at all: installing N sites one at a time means N suspensions of
-// every thread, N thread enumerations at about 118 ms each, and no way back if
+// every enlisted thread, N thread enumerations at about 118 ms each, and no way
+// back if
 // the fifth of seven fails. One transaction writes all of them or none.
 
 // How many bytes `splice_live_site::expected` must point at. Fixed by the

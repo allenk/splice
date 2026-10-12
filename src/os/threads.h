@@ -76,9 +76,13 @@ struct Enumeration {
     std::size_t     count  = 0;   // references written to the buffer, even on failure
 };
 
-// Open every thread of this process except the calling one, writing them into
-// `out`. The caller's own thread is excluded because every caller needs it
-// excluded and only the OS can identify it.
+// Open every thread of this process the OS names at this instant, except the
+// calling one, writing them into `out`. The caller's own thread is excluded
+// because every caller needs it excluded and only the OS can identify it.
+//
+// "At this instant" is the whole of the limitation and it is not a hedge: the
+// OS answers from a snapshot, so a thread created after the answer is not in
+// `out` and no status below reports its absence.
 //
 // On any status other than `ok` the caller must still release the `count`
 // references that were written, and must not proceed: a thread set that is

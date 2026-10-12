@@ -73,12 +73,12 @@ TEST(LiveContention, threads_call_both_targets_across_repeated_installs) {
     if (splice::test::env_is_set("CI")) {
         // Kept a local gate, and the reason is not the one LiveHookStress has.
         // There is no cross-modifying-code window here to be unlucky with. What
-        // this does is suspend every thread in the process several times, with
+        // this does is suspend every enlisted thread several times, with
         // a thread enumeration costing about 118 ms each time, so on a
         // two-vCPU shared runner it is slow rather than wrong -- and a slow
         // gate on shared hardware is a gate that gets switched off.
-        GTEST_SKIP() << "coordinated-tier contention gate: suspends every thread "
-                        "in the process repeatedly; run locally";
+        GTEST_SKIP() << "coordinated-tier contention gate: suspends every "
+                        "enlisted thread repeatedly; run locally";
     }
 
     constexpr int kThreads = 16;

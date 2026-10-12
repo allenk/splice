@@ -191,7 +191,8 @@ through:
 ```
 
 **What `splice::live` does, and the one thing it does not.** It suspends every
-other thread once, reads each one's program counter, and maps any that sits
+other thread it could enumerate, once, reads each one's program counter, and
+maps any that sits
 inside the bytes being replaced through that site's instruction-boundary map --
 so a thread already executing the prologue continues from the relocated copy of
 the instruction it was at. A program counter that is not at a boundary our

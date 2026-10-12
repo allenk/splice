@@ -496,13 +496,14 @@ TEST_F(SwapChainFixture, the_live_tier_on_present_is_measured_not_assumed) {
     // refusal wrote nothing.
     //
     // Local gate, and for the same reason as the contention runner next door
-    // rather than LiveHookStress's: this suspends every thread in the process,
+    // rather than LiveHookStress's: this suspends every thread in the process
+    // that the engine could enumerate,
     // and with a D3D device alive that set includes the runtime's own worker
     // threads. There is no cross-modifying-code window to lose -- the risk is
     // cost and the breadth of what gets frozen, not correctness.
     if (splice::test::env_is_set("CI")) {
-        GTEST_SKIP() << "coordinated-tier graphics gate: suspends every thread "
-                        "in the process with a live D3D device; run locally";
+        GTEST_SKIP() << "coordinated-tier graphics gate: suspends every "
+                        "enlisted thread with a live D3D device; run locally";
     }
 
     void* const before = table_entry(static_cast<void*>(s_chain_a), 8);

@@ -33,7 +33,7 @@
 //     suspensions, with a refusal at the fifth leaving five hooks live and
 //     the module unloadable, becomes impossible by construction.
 //   * **One suspension instead of N.** Seven suspend/resume cycles of every
-//     thread in a process collapse to one, and the enumeration -- which costs
+//     enlisted thread collapse to one, and the enumeration -- which costs
 //     ~118 ms because Toolhelp walks every thread on the machine -- happens
 //     once.
 //
