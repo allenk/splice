@@ -48,8 +48,9 @@
 
 TEST(LiveHookStress, threads_invoke_during_atomic_install) {
     // This test patches a live function WHILE 16 threads execute it. Splice
-    // deliberately does NOT stop the world (an explicit non-goal — that needs
-    // ptrace/root), so safety here rests on the CPU's cross-modifying-code
+    // deliberately does NOT stop the world (an explicit non-goal — reaching
+    // one needs a thread entry-exclusion protocol or privileges this library
+    // does not assume), so safety here rests on the CPU's cross-modifying-code
     // (XMC) behaviour. On real hardware / a quiet multi-core machine the
     // atomic install path holds (validated: 4.7M Windows + 5.9M Android
     // concurrent calls during install, 0 bad / 0 fault). On heavily

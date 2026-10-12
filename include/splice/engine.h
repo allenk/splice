@@ -72,10 +72,12 @@ void* splice_hook_symbol_pre(const char* lib_name,
 //
 // Splice's threat model -- in-process, non-privileged, no ptrace -- is what
 // rules out true reversible uninstall. Not a law of nature: reclaiming the
-// memory needs proof that no thread is executing inside it, and that proof
-// needs either an exclusion protocol this library does not have or privileges
-// it does not assume. Both are scope decisions. What is offered instead is
-// **disable**, in two tiers, named to make the limit visible:
+// memory needs proof that nothing can reach it again, which is three
+// exclusions and not one -- no thread executing inside it, no saved return
+// address into it from a callee, and no retained pointer to it -- and
+// establishing them needs either a protocol this library does not have or
+// privileges it does not assume. Both are scope decisions. What is offered
+// instead is **disable**, in two tiers, named to make the limit visible:
 //
 //   Tier 1 — POINTER_SWAP    (GOT / IAT / vtable slot)
 //     Atomic pointer-sized write of the original back into the slot.
@@ -83,8 +85,8 @@ void* splice_hook_symbol_pre(const char* lib_name,
 //
 //   Tier 2 — INLINE          (target prologue overwritten with jmp)
 //     Atomic restore of the original first instruction word into the
-//     prologue. **Trampoline memory is permanently leaked** because we
-//     can't prove no thread is currently executing inside it. Same
+//     prologue. **Trampoline memory is permanently leaked** because none
+//     of the three exclusions above can be established in-process. Same
 //     trade-off as ShadowHook's lazy cleanup. Documented limitation.
 //
 //   Tier 3 — true reversible uninstall with memory reclaim:
@@ -403,8 +405,9 @@ void splice_live_release(void* group);
 //   - INLINE      : the prologue holds the original bytes again, restored with
 //                   one atomic access to the word containing the patch.
 //                   Trampoline memory remains allocated -- permanently, and by
-//                   design: nothing in-process can prove no thread is still
-//                   executing inside it. See FR-013 Tier 3.
+//                   design: reclaiming it needs proof that nothing can reach
+//                   it again, and the paragraph below names the three things
+//                   that would have to be excluded. See FR-013 Tier 3.
 //
 // What "reversed" does NOT mean, on either strategy: calls already in flight are
 // not cancelled. A thread inside the hook, or inside the trampoline, or holding

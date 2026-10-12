@@ -51,8 +51,9 @@ All notable changes to Splice are documented here. Format follows
     merely that it survived.
   - **The limit, stated rather than implied:** `splice::live` means splice
     coordinated the threads it could enumerate. A thread created after the
-    enumeration is not in the set. It is not a stop-the-world, which needs
-    ptrace or root and remains a non-goal, and the tier is named `live` rather
+    enumeration is not in the set. It is not a stop-the-world, which remains
+    a non-goal: reaching one needs a thread entry-exclusion protocol or
+    privileges this library does not assume. The tier is named `live` rather
     than `safe` for that reason. `splice::live_tier_available()` reports whether
     it can run on a build at all; it needs an architecture whose prologue can be
     planned and an OS that can suspend a thread, which today means x86_64 on

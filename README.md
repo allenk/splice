@@ -118,7 +118,8 @@ not at a recognised boundary is refused and nothing is written.
 
 Its limit, stated rather than implied: **it coordinates the threads it could
 enumerate.** A thread created after the enumeration is not in the set. It is not
-a stop-the-world — that needs ptrace or root and is a non-goal — which is why
+a stop-the-world — that remains a non-goal, and reaching one needs a thread
+entry-exclusion protocol or privileges Splice does not assume — which is why
 the tier is named `live` and not `safe`. `splice::live_tier_available()` reports
 whether it can run at all on a given build.
 
