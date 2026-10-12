@@ -439,7 +439,7 @@ cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
 | `uninstallAll()` | Same reason; replaced by `disable_all()` |
 | Windows VEH hooking | Not needed; SEH path is sufficient |
 | Kernel-mode hooking | Out of scope |
-| Stop-the-world thread suspend | Needs ptrace / root |
+| Stop-the-world thread suspend | Needs a thread entry-exclusion protocol or privileges this library does not assume — see §3.4b |
 | Hook priority ordering | Install order = execution order; no separate priority API |
 | Python / Rust bindings | Not for v1.0 |
 | Unity / Unreal engine integration layer | Out of scope |
