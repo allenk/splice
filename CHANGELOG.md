@@ -741,8 +741,11 @@ Known test-design issue (NOT a Splice library bug — filed as task):
 ### Design decisions
 - No C++ logging library (spdlog/fmt/glog) — too expensive for hook hot-path
 - `disable()`/`disable_all()` (tiered), NOT `uninstall()` — true reversible
-  uninstall is architecturally impossible for in-process non-privileged
-  inline hooks (see FR-013)
+  uninstall is out of scope for in-process non-privileged inline hooks,
+  because reclaiming the trampoline needs proof that nothing can reach it
+  again — no thread executing inside it, no saved return address into it,
+  and no retained pointer to it — and no protocol here provides it
+  (see FR-013)
 - ARM64 disassembly will be ported **verbatim** from the predecessor framework.h v3.0
 - Callback type is a template parameter, not `std::function`, so the
   fluent chain fully inlines (FR-010)

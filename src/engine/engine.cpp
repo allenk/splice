@@ -653,8 +653,11 @@ int splice_disable(const splice_patch_record* record) {
             // maintenance on ARM64) and reverse the rest non-atomically
             // while it's still unreachable. Trampoline memory remains
             // allocated forever — same trade-off ShadowHook documents,
-            // because we cannot prove no thread is currently executing
-            // inside it.
+            // because freeing it needs proof that nothing can reach it
+            // again, and that is three things rather than one: no thread
+            // executing inside it, no saved return address into it from a
+            // callee, and no retained pointer to it. Absence of a current
+            // instruction pointer is necessary and not sufficient.
             void* target = record->hook_site;
             const unsigned int len = record->pre_hook_byte_len;
             if (target == nullptr || len == 0) {

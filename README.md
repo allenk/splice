@@ -190,7 +190,7 @@ Using Splice in a project? Open an issue or a PR to be listed here.
 3. **Zero-friction for the 90% case** — one-arg macros; escape hatches for the rest.
 4. **Platform-honest** — GOT/PLT on ELF, IAT on PE, atomic inline patching everywhere.
 5. **Hot-path aware logging** — C macro substrate (not spdlog/fmt), `_ONCE` / `_EVERY_N` variants inside callbacks.
-6. **Honest about limits** — true reversible uninstall is impossible for in-process non-privileged inline hooks. Splice offers tiered `disable()` (Tier 1 reversible; Tier 2 atomic restore, trampoline leaks) and says so plainly — see [`docs/splice-guide.md`](docs/splice-guide.md) §9.
+6. **Honest about limits** — true reversible uninstall is out of scope, by a missing protocol rather than by a law: reclaiming the trampoline needs proof that nothing can reach it again, and nothing here establishes it. Tiered `disable()` instead (Tier 1 reversible; Tier 2 atomic restore, trampoline leaks), said plainly — see [`docs/splice-guide.md`](docs/splice-guide.md) §9.
 
 ## How Splice compares
 

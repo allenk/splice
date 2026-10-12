@@ -13,7 +13,10 @@
 //   call          →  original behaviour again, hook callback no longer fires
 //
 // Trampoline memory remains allocated forever per the documented FR-013
-// limitation — we cannot prove no thread is currently inside it.
+// limitation — the missing proof is broader than
+// "no thread is inside it": a callee can hold a saved return address
+// into it, and disable permits a previously loaded pointer to be used
+// afterwards.
 //
 // Target choice: `splice::test::multiply_two` is defined in test_targets.cpp
 // (separate TU, noinline). On Windows it has no IAT slot (it's defined IN

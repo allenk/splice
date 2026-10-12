@@ -135,8 +135,9 @@ The fix is one of:
 - **Atomic single-store of the entire patch** (only works if the patch
   fits in a single architectural atomic store size — 8 bytes on x86_64,
   4 bytes on ARM64)
-- **Stop-the-world thread suspension** during the write (Detours does
-  this; needs ptrace / SuspendThread)
+- **Stop-the-world thread suspension** during the write (Detours does this
+  with `SuspendThread`, which needs no elevation for a process's own threads;
+  what it does not get is a guarantee that the set it suspended is complete)
 - **Two-stage write** where the intermediate state is also valid code
   (e.g. write a `0xCC` int3 first, install a trap handler, complete
   the patch under the trap)

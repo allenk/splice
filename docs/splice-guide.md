@@ -435,7 +435,7 @@ cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
 
 | Feature | Why not |
 |---|---|
-| True uninstall + memory reclaim | Architecturally impossible in-process non-priv — ShadowHook and LSPlant can't either |
+| True uninstall + memory reclaim | Out of scope: reclaiming it needs proof that nothing can reach it again — no thread inside it, no saved return address into it, no retained pointer to it — and no protocol here establishes that. ShadowHook and LSPlant make the same trade |
 | `uninstallAll()` | Same reason; replaced by `disable_all()` |
 | Windows VEH hooking | Not needed; SEH path is sufficient |
 | Kernel-mode hooking | Out of scope |

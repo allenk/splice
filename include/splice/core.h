@@ -256,7 +256,11 @@ public:
     // What disable does NOT do: cancel calls already in flight. A thread inside
     // the hook, inside the trampoline, or holding a pointer it has already
     // loaded carries on to completion. It is a switch, not a drain — which is
-    // also why the trampoline can never be freed.
+    // also why the trampoline is never freed: reclaiming it would need
+    // proof that nothing can reach it again — no thread executing
+    // inside it, no saved return address into it from a callee, and no
+    // retained pointer to it — and this library has no protocol that
+    // establishes any of the three.
     //
     // Returns true on success. After successful disable, calls to the
     // hooked function go to the original behaviour again. The
