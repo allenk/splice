@@ -151,8 +151,8 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
         // address came from a caller and may not name mapped memory at all.
         // Reading it first to snapshot the prologue would fault on a bad
         // address instead of refusing; VirtualProtect and mprotect both fail
-        // cleanly on one. It is also the order S-13 settled for the single-site
-        // path: acquire permission before doing anything that can be observed.
+        // cleanly on one. It is also the order the single-site path settled on:
+        // acquire permission before doing anything that can be observed.
         if (!os::make_executable_writable(site.target, kSiteWindow)) {
             SPLICE_LOGE("splice_live_prepare: site %u at %p cannot be made "
                         "writable; it may not be mapped executable code",

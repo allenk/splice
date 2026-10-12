@@ -9,7 +9,7 @@
 // call at a time.
 //
 // What the eventual implementation looks like, recorded here because the shape
-// is the research and the file is where it lands (S-17):
+// is the research and this file is where it lands:
 //
 //   enumerate   walk /proc/self/task, which lists tids rather than handles, so
 //               ThreadRef would carry a tid and release_thread would be a

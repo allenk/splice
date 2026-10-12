@@ -24,7 +24,7 @@ protected:
     }
 };
 
-// T-011-14: all alignments, with the real allocator and actual patch bytes.
+// All alignments, with the real allocator and actual patch bytes.
 TEST_F(StrictInstall, alignment_matrix_refuses_before_publication) {
     splice::os::restore_executable(block, 4096);
     for (unsigned offset = 0; offset != 8; ++offset) {
@@ -120,7 +120,7 @@ TEST_F(StrictInstall, invalid_snapshot_size_and_null_inputs_are_refused) {
     }
 }
 
-// T-011-15: unsupported short and indirect jump stubs are not followed.
+// Unsupported short and indirect jump stubs are not followed.
 TEST_F(StrictInstall, short_and_indirect_jumps_are_refused_unchanged) {
     block[0] = 0xeb;
     block[1] = 62;  // Jump to block + 64.
@@ -150,7 +150,7 @@ TEST_F(StrictInstall, short_and_indirect_jumps_are_refused_unchanged) {
 }
 
 #if defined(_WIN32)
-// T-011-15: the other DLL owns a different Splice registry.
+// The other DLL owns a different Splice registry.
 TEST(StrictDecoy, independent_dll_jump_and_destination_remain_unchanged) {
     auto* site = static_cast<unsigned char*>(splice_test_decoy_site());
     ASSERT_NE(site, nullptr);

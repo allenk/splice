@@ -730,7 +730,7 @@ TEST(NearAlloc, hooking_through_a_rel32_thunk_patches_the_function_behind_it) {
     // stale entry unwraps through whatever now lives there and patches it --
     // which is exactly what happened when these three tests were first run
     // together, and it is a use-after-free in all but name. 4 KB per test, in a
-    // process that exits in seconds, is the right trade. See S-12.
+    // process that exits in seconds, is the right trade.
 }
 
 TEST(NearAlloc, hooking_through_an_abs64_thunk_patches_the_function_behind_it) {
@@ -780,7 +780,7 @@ TEST(NearAlloc, hooking_through_an_abs64_thunk_patches_the_function_behind_it) {
     // stale entry unwraps through whatever now lives there and patches it --
     // which is exactly what happened when these three tests were first run
     // together, and it is a use-after-free in all but name. 4 KB per test, in a
-    // process that exits in seconds, is the right trade. See S-12.
+    // process that exits in seconds, is the right trade.
 }
 
 TEST(NearAlloc, unwrapping_stops_at_our_own_patch_and_the_second_hook_is_refused) {
@@ -833,7 +833,7 @@ TEST(NearAlloc, unwrapping_stops_at_our_own_patch_and_the_second_hook_is_refused
     // stale entry unwraps through whatever now lives there and patches it --
     // which is exactly what happened when these three tests were first run
     // together, and it is a use-after-free in all but name. 4 KB per test, in a
-    // process that exits in seconds, is the right trade. See S-12.
+    // process that exits in seconds, is the right trade.
 }
 
 // ─── V-4: the paths only concurrency reaches ───────────────────────────────
@@ -927,7 +927,7 @@ std::atomic<int> g_v4_cycle_calls{0};
 
 // Install and disable repeatedly, checking behaviour every round.
 //
-// FR-011 T-011-03 asks for 10 000 cycles; this runs 300. The reason is S-10 --
+// FR-011's acceptance criteria ask for 10 000 cycles; this runs 300, because
 // each install allocates a trampoline that is never reclaimed, so 10 000 rounds
 // retains roughly 40 MB and would look like a leak to any tool watching, because
 // it is one. 300 rounds costs about 1.2 MB, exercises the same state machine,

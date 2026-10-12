@@ -43,7 +43,7 @@ void atomic_install_indirect_branch(void*, void*) {
 }
 }
 
-// T-011-17: host execution tests lifecycle, not ARM instruction execution.
+// Host execution tests lifecycle, not ARM instruction execution.
 TEST(Arm64PatcherFailure, denied_write_does_not_publish_or_modify_target) {
     alignas(16) std::array<std::uint32_t, 16> target{};
     target.fill(0xd503201f);  // ARM64 NOP: relocatable, no earlier failure.

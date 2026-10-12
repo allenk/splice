@@ -81,7 +81,7 @@ SPLICE_TEST_NOINLINE void TargetInThisBinary() { g_sink = g_sink + 1; }
 
 }  // namespace
 
-// ─── the measurement S-01 asks for ────────────────────────────────────────
+// ─── the measurement near-allocation rests on ─────────────────────────────
 
 TEST(Arm64Reach, blind_allocation_cannot_reach_this_binary) {
 #if !SPLICE_TEST_ARM64
@@ -104,8 +104,8 @@ TEST(Arm64Reach, blind_allocation_cannot_reach_this_binary) {
     EXPECT_GT(magnitude(d), kAdrpReach)
         << "An unhinted mapping landed within ADRP range of this binary. That is "
            "not a failure -- it means this platform places anonymous mappings "
-           "near the executable, and S-01 shrinks here. Re-measure before "
-           "relying on it.";
+           "near the executable, and the need for near-allocation shrinks "
+           "here. Re-measure before relying on it.";
 
     splice::os::free_executable_memory(blind, 4096);
 #endif
@@ -115,8 +115,8 @@ TEST(Arm64Reach, hinted_allocation_reaches_this_binary) {
 #if !SPLICE_TEST_ARM64
     GTEST_SKIP() << "ARM64 only: this measures ARM64's relocation budgets";
 #else
-    // The S-01 fix: pass the target as the hint. This is the test that has to
-    // keep passing once patcher.cpp does it.
+    // The fix: pass the target as the allocation hint. This is the test that
+    // has to keep passing once patcher.cpp does it.
     const auto* target = reinterpret_cast<const void*>(&TargetInThisBinary);
     void* near_block = splice::os::allocate_executable_memory(4096, target);
     ASSERT_NE(near_block, nullptr);
@@ -147,7 +147,7 @@ TEST(Arm64Reach, hinted_allocation_reaches_this_binary) {
 #endif
 }
 
-// ─── the case S-01 did not anticipate ─────────────────────────────────────
+// ─── the case near-allocation did not anticipate ──────────────────────────
 //
 // A shared library, which is the shape that actually gets hooked on Android, is
 // a completely different measurement from the executable -- and the answer runs
@@ -180,7 +180,7 @@ TEST(Arm64Reach, a_shared_library_is_already_within_adrp_unhinted) {
     // still fail.
     EXPECT_LE(magnitude(d), kAdrpReach)
         << "An unhinted mapping was more than 4 GB from libc. If this starts "
-           "failing, shared-library targets need near-allocation too and S-01's "
+           "failing, shared-library targets need near-allocation too, and its "
            "scope grows.";
 
     splice::os::free_executable_memory(blind, 4096);
@@ -198,13 +198,14 @@ TEST(Arm64Reach, adr_range_to_a_shared_library_is_not_obtainable) {
         GTEST_SKIP() << "no dlsym for memcpy on this platform";
     }
 
-    // Ask for a block near libc, the same way the S-01 fix would.
+    // Ask for a block near libc, the same way the hinted allocation does.
     void* near_block = splice::os::allocate_executable_memory(4096, libc_symbol);
     ASSERT_NE(near_block, nullptr);
     const std::int64_t d = distance(libc_symbol, near_block);
     report("hinted -> libc memcpy", d);
 
-    // This is the finding, and it is why S-02 is not belt-and-braces.
+    // This is the finding, and it is why absolute materialisation is not
+    // belt-and-braces.
     //
     // The finding, stated as what was measured: ADR range beside a shared library
     // is obtainable SOMETIMES, and that is worse than never.
@@ -223,13 +224,13 @@ TEST(Arm64Reach, adr_range_to_a_shared_library_is_not_obtainable) {
     //
     // An install that works one time in four is worse than one that never works,
     // because it passes testing and fails in the field. That, rather than
-    // impossibility, is why S-02 is required.
+    // impossibility, is why materialising the address absolutely is required.
     //
     // On Ubuntu 24.04 aarch64 (Jetson Orin Nano) the probe succeeded at -650 KB,
     // but needed 324 of its 512 probes -- close to the edge there too.
     //
     // What a better search cannot do: if the region is genuinely full, no amount
-    // of searching creates a gap. Reading /proc/self/maps (S-03) would answer
+    // of searching creates a gap. Reading /proc/self/maps would answer
     // faster and would find gaps a linear probe steps over, but it cannot put a
     // page within +/-1 MB of libc when there is no room. And for the executable
     // case above, 1.14 MB was not a search failure at all -- it is simply where
@@ -239,12 +240,12 @@ TEST(Arm64Reach, adr_range_to_a_shared_library_is_not_obtainable) {
     // on the same device within minutes. Asserting either would encode one
     // process layout as a requirement.
     if (magnitude(d) > kAdrReach) {
-        std::printf("[reach] ADR range NOT obtainable beside libc -- S-02's "
-                    "absolute materialisation is the only fix for an ADR in a "
-                    "shared library's prologue\n");
+        std::printf("[reach] ADR range NOT obtainable beside libc -- absolute "
+                    "materialisation is the only fix for an ADR in a shared "
+                    "library's prologue\n");
     } else {
         std::printf("[reach] ADR range obtainable beside libc on this platform "
-                    "(%.2f KB) -- does not generalise, see S-02\n",
+                    "(%.2f KB) -- does not generalise\n",
                     static_cast<double>(magnitude(d)) / 1024.0);
     }
 
@@ -263,7 +264,7 @@ TEST(Arm64Reach, adr_range_to_a_shared_library_is_not_obtainable) {
 // array, which on AArch64 forces ADRP (+ADD or +LDR) into the first four
 // instructions, which is exactly the window calculate_copy_size copies.
 //
-// Before the S-01 fix this install is REFUSED on ARM64 with
+// Without the near-allocation hint this install is REFUSED on ARM64 with
 // "Complex PC-relative fixup not implemented" -- verified by reverting the one
 // line and re-running, which is the only way to know the test is testing
 // something. Afterwards it succeeds and the hook is entered.
@@ -277,7 +278,8 @@ int g_pcrel_hits = 0;
 // This test is worthless unless the target's first four instructions actually
 // contain a PC-relative address computation, and whether they do is the
 // compiler's decision, not ours. The first version of the target did not, and the
-// hook test passed with S-01's fix reverted -- so this guard exists because its
+// hook test passed with near-allocation reverted -- so this guard exists because
+// its
 // absence already cost a false pass once.
 TEST(Arm64Reach, the_pcrel_target_really_has_a_pcrel_prologue) {
 #if !SPLICE_TEST_ARM64
@@ -305,8 +307,9 @@ TEST(Arm64Reach, the_pcrel_target_really_has_a_pcrel_prologue) {
 
     EXPECT_GT(pcrel, 0)
         << "The target's first four instructions contain no ADRP or ADR, so the "
-           "hook test below proves nothing about S-01 -- calculate_copy_size "
-           "copies 16 bytes and the relocation that was failing is not in them. "
+           "hook test below proves nothing about near-allocation -- "
+           "calculate_copy_size copies 16 bytes and the relocation that was "
+           "failing is not in them. "
            "Change the target, do not relax this.";
 #endif
 }
@@ -327,9 +330,9 @@ TEST(Arm64Reach, a_pcrel_prologue_can_be_hooked_inline) {
     // pcrel_prologue_target.
     splice::install_all();
     ASSERT_TRUE(entry.is_installed())
-        << "installing over a PC-relative prologue failed. On ARM64 this is "
-           "S-01: the trampoline is too far for the copied ADRP to be "
-           "relocated, and the engine returned a null stub.";
+        << "installing over a PC-relative prologue failed. On ARM64 this means "
+           "the trampoline is too far for the copied ADRP to be relocated, "
+           "and the engine returned a null stub.";
 
     EXPECT_EQ(splice::test::pcrel_prologue_target(), 10);
     EXPECT_EQ(g_pcrel_hits, 1);

@@ -77,7 +77,7 @@ SPLICE_TEST_NOINLINE SPLICE_TEST_ALIGN16 int contention_target_b(int x);
 SPLICE_TEST_NOINLINE int batch_target_a(int x);
 SPLICE_TEST_NOINLINE int batch_target_b(int x);
 
-// ARM64 S-01: a target whose prologue really does contain a PC-relative address
+// ARM64: a target whose prologue really does contain a PC-relative address
 // computation, so the relocation budget that decides whether ARM64 can be hooked
 // at all is actually exercised.
 //
@@ -88,14 +88,15 @@ SPLICE_TEST_NOINLINE int batch_target_b(int x);
 // NO PARAMETER AND NO BRANCH, deliberately. The first version took an int and
 // bounds-checked it, and the disassembly showed why that was useless: the first
 // four instructions were `sub sp / str w0 / ldr w8 / tbnz` and the ADRP sat 0x30
-// bytes in, past the 16 bytes calculate_copy_size copies. The test passed with
-// S-01's fix reverted. Anything before the address computation risks pushing it
+// bytes in, past the 16 bytes calculate_copy_size copies. The test passed even
+// with near-allocation disabled. Anything before the address computation risks
+// pushing it
 // out of the window, so there is nothing before it but the frame setup -- and
 // test_arm64_reach.cpp checks that premise at runtime rather than trusting it.
 //
 // 18.8 % of the functions in the NDK's libc++_shared.so have one of these in
-// their first four instructions, and before S-01's fix every one of them was
-// unhookable inline.
+// their first four instructions, and before the trampoline was allocated near
+// the target, every one of them was unhookable inline.
 SPLICE_TEST_NOINLINE long pcrel_prologue_target();
 
 } // namespace splice::test

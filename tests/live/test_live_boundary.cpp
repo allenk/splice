@@ -1,7 +1,7 @@
 // ─── R2: the controlled boundary window ───────────────────────────────────
 //
-// The fixture owed since 2026-10-02. S-14 asks what happens to a thread that
-// is already at an instruction boundary inside `target+1..4` when a five-byte
+// The fixture owed since 2026-10-02, for the question of what happens to a
+// thread already at an instruction boundary inside `target+1..4` when a five-byte
 // jump is written over it, and the answer has always been "nobody knows,
 // because nothing can put a thread there on demand".
 //
@@ -408,7 +408,8 @@ TEST_F(BoundaryWindow, an_interior_program_counter_refuses_and_writes_nothing) {
 // ─── the check/write window, closed by construction ───────────────────────
 
 TEST_F(BoundaryWindow, a_prologue_changed_between_prepare_and_commit_is_refused) {
-    // S-18's shape: the bytes are compared, and then written. The coordinated
+    // The shape of the defect: the bytes are compared, and then written. The
+    // coordinated
     // tier closes that window by suspending everything that could write inside
     // it, so the only writer left is the installing thread -- which is what
     // this drives, through the C ABI, in the one place where "between prepare

@@ -18,7 +18,7 @@
 //
 // The census also prints the distribution, because a number nobody looks at is
 // worth less than a number in the log. Prior art in this project: the ADRP
-// census under splice-todo S-01 turned "common" into 18.8 %.
+// census that drove near-allocation turned "common" into 18.8 %.
 #include <gtest/gtest.h>
 
 #include <arch/x86_64/disasm.h>

@@ -86,7 +86,7 @@ TEST(PreparedPatchOwnership, committed_storage_is_retained_without_os_calls) {
     EXPECT_EQ(frees, 0u);
 }
 
-// T-011-13: failure must not publish a trampoline that cleanup releases.
+// Failure must not publish a trampoline that cleanup releases.
 TEST(PatcherFailure, denied_write_does_not_publish_or_modify_target) {
     alignas(16) std::array<std::uint8_t, 64> target{};
     target.fill(0x90);  // Relocatable NOPs, no accidental earlier decode failure.
@@ -111,7 +111,7 @@ TEST(PatcherFailure, denied_write_does_not_publish_or_modify_target) {
     EXPECT_EQ(target, before);
 }
 
-// T-011-16: fixture distances are checked, not assumed across all toolchains.
+// Fixture distances are checked, not assumed across all toolchains.
 // The synthetic replacement is deliberately a terabyte away.
 TEST(PatcherFailure, strict_range_and_permission_matrix) {
     alignas(16) static std::array<std::uint8_t, 64> near_target{};

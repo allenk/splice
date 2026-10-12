@@ -312,7 +312,7 @@ TEST(OsThreads, the_program_counter_can_be_read_and_written_while_suspended) {
 // Platform-honest rather than silently absent: the surface exists, compiles,
 // and refuses, so the engine can refuse the tier at compile time and a caller
 // that ignores that still cannot do damage. The shape of the eventual
-// implementation is recorded in src/os/posix/threads.cpp (S-17).
+// implementation is recorded in src/os/posix/threads.cpp.
 TEST(OsThreads, this_os_reports_no_coordination_and_refuses_every_call) {
     EXPECT_FALSE(splice::os::kCoordinationSupported);
 
