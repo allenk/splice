@@ -334,7 +334,10 @@ typedef struct {
 
 // Plan every site. Allocates trampolines, snapshots prologues, builds the
 // instruction-boundary maps, makes the targets writable and opens a reference
-// to every other thread of the process. **Nothing is written to any target.**
+// to every other thread the OS names at this instant. **Nothing is written to
+// any target.** The enumeration happens once, here; a thread created after it
+// is not in the set and is not detected, which is the limit the coordinated
+// tier is named `live` rather than `safe` for.
 //
 // `originals_out`, when given, receives `count` pointers: each one calls the
 // original behaviour of the matching site, and is what the caller publishes
@@ -352,9 +355,12 @@ int splice_live_supported(void);
 void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
                           void** originals_out, splice_live_outcome* out);
 
-// Suspend every other thread, map any program counter that sits inside the
-// bytes being replaced, write every site, flush, resume. One attempt per
-// group.
+// Suspend every thread prepare enlisted, map any program counter that sits
+// inside the bytes being replaced, write every site, flush, resume. One attempt
+// per group.
+//
+// The set is the one prepare captured, not whatever the process holds now. A
+// thread that appeared since is neither suspended nor reported.
 //
 // `records_out`, when given and the outcome is installed, receives `count`
 // patch records so each site can later be reversed with splice_disable.

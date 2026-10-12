@@ -110,7 +110,8 @@ guess when they cannot be — `.on_slot(8, &I::Present, cb)` names the index by
 hand with the signature still checked.
 
 The second tier, `splice::live`, inline-patches the function the slot points at
-under one suspension of every other thread, so it survives another overlay
+under one suspension of every thread splice could enumerate, so it survives
+another overlay
 swapping the same slot. A thread already executing the prologue is continued
 from the relocated copy of the instruction it was at; a program counter that is
 not at a recognised boundary is refused and nothing is written.

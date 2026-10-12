@@ -15,10 +15,20 @@
 //   oversubscribed runner the window can produce a fault that says nothing
 //   about the library.
 //
-//   Here every other thread is suspended for the duration of the write. There
-//   is no cross-modifying-code window to lose, because nothing is executing
-//   while the bytes change. If this test ever reports a third value, it is not
-//   the machine being unlucky.
+//   Here every thread the engine could enumerate is suspended for the
+//   duration of the write, so for those threads there is no
+//   cross-modifying-code window to lose: nothing in the enlisted set is
+//   executing while the bytes change. If this test ever reports a third value
+//   from an enlisted thread, it is not the machine being unlucky.
+//
+//   The qualification is not pedantry and it bounds what this test proves. The
+//   enlisted set is one enumeration taken before the first suspension, and a
+//   thread created after it is neither suspended nor detected. Every worker
+//   here is started before the first install and joined after the last, which
+//   is what puts them all in the set -- so this runner demonstrates the
+//   property for a set it arranged to be complete, and says nothing about a
+//   process where threads appear during an install. That case has no detector
+//   anywhere in this project.
 //
 // So the install is repeated -- install, disable, install, disable, under
 // continuous load -- because one install can get away with a race that a dozen

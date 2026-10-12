@@ -32,8 +32,10 @@
 //                      other overlays' slot swaps, because every existing slot
 //                      pointer stays valid and the call still arrives. Needs
 //                      the thread coordination the engine half performs: every
-//                      other thread suspended once, any program counter inside
-//                      the bytes being replaced mapped through the trampoline,
+//                      thread it could enumerate suspended once -- a thread that
+//                      appears after that enumeration is neither covered nor
+//                      detected -- any program counter inside the bytes being
+//                      replaced mapped through the trampoline,
 //                      all sites written, resume.
 //
 // Neither tier is scoped to an object, and `Vtable` takes one, so: a class has
@@ -610,7 +612,8 @@ public:
     // ─── install: the coordinated tier ────────────────────────────────────
     //
     // Inline-patches the function behind each site, under one suspension of
-    // every other thread. Three calls into the engine, and their order is the
+    // every thread the engine could enumerate. Three calls into the engine, and
+    // their order is the
     // contract: prepare allocates and opens everything, the publication
     // happens here where taking a lock is still safe, and commit suspends,
     // writes and resumes without allocating anything at all.

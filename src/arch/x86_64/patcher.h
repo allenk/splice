@@ -61,7 +61,9 @@ public:
     bool commit_write() noexcept;
     // Put the prologue back, for a group whose later site failed. Only valid
     // after commit_write, and only while the callers are excluded -- which for
-    // the group transaction means while every other thread is still suspended.
+    // the group transaction means while every ENLISTED thread is still
+    // suspended. Not every thread of the process: the enlisted set is one
+    // snapshot, and exclusion is only as complete as that snapshot was.
     // The storage is retained either way: a thread may have been migrated into
     // it, and an address something might still reach is not free.
     bool restore_write() noexcept;

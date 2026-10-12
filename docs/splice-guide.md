@@ -162,7 +162,7 @@ Every per-method gate from §3.2 applies — `.when()`, `.once()`, `.times(n)`,
 | Tier | Mechanism | Coordination | Reaches |
 |---|---|---|---|
 | `splice::slot_swap` | one atomic pointer-sized store into the vtable slot | none needed | that vtable -- which is **every object sharing it**, not just the one you passed; another overlay swapping the same slot displaces you, or you displace it |
-| `splice::live` | inline patch of the function the slot points at | every other thread suspended once | that function -- every vtable pointing at it, and direct callers too; survives other overlays' slot swaps, because every existing slot pointer stays valid |
+| `splice::live` | inline patch of the function the slot points at | every thread splice could enumerate, suspended once | that function -- every vtable pointing at it, and direct callers too; survives other overlays' slot swaps, because every existing slot pointer stays valid |
 
 **Neither tier is scoped to an object, and the constructor takes one, so this
 is worth being plain about.** `splice::Vtable<T>{object}` reads the object's

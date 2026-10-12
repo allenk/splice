@@ -203,7 +203,9 @@ inline void retain_all(LiveGroup& group) noexcept {
     for (auto& site : group.sites) site.plan.retain_storage();
 }
 
-// Suspend every other thread, write every site, resume. See the phase list at
+// Suspend every enlisted thread, write every site, resume. The enlisted set is
+// what prepare captured; this cannot see a thread that appeared since. See the
+// phase list at
 // the top of this file.
 //
 // `group` must come from a successful prepare, and the caller must already

@@ -14,7 +14,8 @@
 // "something quietly did a slot swap instead", and a tier that silently
 // degrades is the failure this design is most exposed to.
 //
-// Each install suspends every other thread of the test process once. Under
+// Each install suspends every thread of the test process the engine could
+// enumerate, once. Under
 // gtest that is a handful of threads, and the enumeration behind it costs about
 // 118 ms because the OS walks every thread on the machine -- which is why the
 // group exists and why these tests are not instant.
@@ -319,7 +320,10 @@ TEST_F(LiveTier, an_address_that_is_not_mapped_code_is_refused_not_read) {
 TEST_F(LiveTier, a_worker_thread_keeps_running_across_the_install) {
     // Not a contention test -- that is a separate runner and a local gate.
     // This one asserts the simplest property of a transaction that suspends
-    // every other thread: it resumes them. A worker that stops counting has
+    // the threads it enlisted: it resumes them. The worker is started before
+    // the install and joined after it, so it is in the enlisted set by
+    // construction -- which is what makes the assertion meaningful rather than
+    // a coincidence. A worker that stops counting has
     // been left suspended, which is the failure mode with the worst
     // consequences and the cheapest check.
     std::atomic<bool> stop{false};

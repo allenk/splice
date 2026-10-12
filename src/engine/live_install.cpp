@@ -186,7 +186,9 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
         if (originals_out != nullptr) originals_out[i] = site.plan.original();
     }
 
-    // Open every other thread of the process. Once, here, because a thread
+    // Open every other thread the OS names right now -- which is not provably
+    // every thread of the process, and nothing here can tell the difference.
+    // Once, here, because a thread
     // snapshot costs about 118 ms -- Toolhelp walks every thread on the
     // machine, not this process's -- and because an incomplete thread set is
     // the one thing coordination cannot be built on.

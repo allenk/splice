@@ -24,7 +24,7 @@ All notable changes to Splice are documented here. Format follows
     the signature still checked.
   - Two tiers, named: `splice::slot_swap` stores one pointer into the vtable slot
     and needs no coordination; `splice::live` inline-patches the function behind
-    the slot, under one suspension of every other thread.
+    the slot, under one suspension of every thread splice could enumerate.
   - **Neither tier is scoped to an object**, although the constructor takes one,
     and the guide and the header now say so rather than leaving it to be
     inferred. A concrete class has one vtable shared by every instance, so a

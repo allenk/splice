@@ -59,7 +59,12 @@ struct ThreadRef {
 };
 
 enum class EnumerateStatus {
-    ok,          // out[0, count) is every other thread of this process
+    // `ok` means the OS answered and every thread it named was opened. It does
+    // NOT mean the set is every thread of the process: the answer is a snapshot
+    // taken at one instant, and a thread created after it is not in the set and
+    // is not detected. No status distinguishes those two situations, because
+    // nothing here can; see the limit recorded against the coordinated tier.
+    ok,          // out[0, count) is every thread the OS named, opened
     truncated,   // the buffer was too small; the set is incomplete
     unstable,    // threads kept appearing or dying faster than they could be opened
     failed,      // the OS would not enumerate or would not open a live thread
