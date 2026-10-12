@@ -28,6 +28,26 @@
 #include <cstdint>
 #include <cstring>
 
+// Everything from here to the matching #endif needs an x86-64 prologue
+// decoder. `splice_prologue_profile` is compiled only for that backend and
+// documents the consequence in the public header -- it returns -1 "when the
+// architecture has no decoder compiled" -- so on ARM64 these four cases assert
+// a 0 that cannot happen. They reported four failures on every ARM64 run until
+// 2026-10-13, which is worse than it sounds: a suite that is always red is one
+// people stop reading.
+//
+// The refusal case below the #endif is deliberately outside the guard. It
+// asserts -1 and is true on every architecture, so guarding the whole file
+// would have discarded coverage that works.
+//
+// An ARM64 equivalent is not written and is not a prerequisite: the question
+// these facts answer -- "does the patch window end on an instruction boundary"
+// -- is trivially yes on AArch64, where instructions are four bytes and the
+// window is sixteen. If that question is ever asked there, it wants its own
+// encodings and its own arithmetic, not a translation of these.
+// Guard spelling matches tests/test_near_alloc.cpp:101.
+#if defined(_M_X64) || defined(__x86_64__)
+
 namespace {
 
 // mov eax, 0x11223344   (B8 44 33 22 11)   five bytes, then ret.
@@ -121,6 +141,8 @@ TEST(PrologueFacts, a_thunk_is_followed_so_the_facts_describe_the_function) {
     }
 }
 
+#endif  // x86_64
+
 TEST(PrologueFacts, an_address_that_names_nothing_is_refused_not_read) {
     splice_prologue_facts facts{};
     facts.patch_bytes = 0xDEADu;
@@ -131,6 +153,12 @@ TEST(PrologueFacts, an_address_that_names_nothing_is_refused_not_read) {
     EXPECT_EQ(facts.patch_bytes, 0xDEADu) << "a refusal wrote to the output";
 
     EXPECT_EQ(splice_prologue_profile(nullptr, &facts), -1);
+    // A real function rather than one of the x86 fixtures above: the null
+    // output pointer is checked before the architecture branch, so this case
+    // is about the output and holds on every target.
     splice_prologue_facts* const nowhere = nullptr;
-    EXPECT_EQ(splice_prologue_profile(g_one_instruction_entry, nowhere), -1);
+    EXPECT_EQ(splice_prologue_profile(
+                  reinterpret_cast<const void*>(&splice::test::batch_target_a),
+                  nowhere),
+              -1);
 }
