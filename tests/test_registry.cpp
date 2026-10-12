@@ -11,6 +11,24 @@
 #include <thread>
 #include <vector>
 
+namespace {
+
+// Synthetic registry ids, expressed against the capacity rather than written
+// as round numbers. The hot-path registries are selected at build time and the
+// default is a fixed array of SPLICE_MAX_HOOKS entries, so an id is an index,
+// not a label: 30001 was a perfectly good name under the old map and is out of
+// range under the array. Counting down from the top also keeps these clear of
+// the low slots `HookContext::slot_for` issues to real hooks in this process.
+constexpr int kIdOriginalRoundTrip   = SPLICE_MAX_HOOKS - 1;
+constexpr int kIdOriginalByKey       = SPLICE_MAX_HOOKS - 2;
+constexpr int kIdNothingStored       = SPLICE_MAX_HOOKS - 3;
+constexpr int kIdHookNoCallback      = SPLICE_MAX_HOOKS - 4;
+constexpr int kIdHookWithCallback    = SPLICE_MAX_HOOKS - 5;
+constexpr int kIdHookIntSignature    = SPLICE_MAX_HOOKS - 6;
+constexpr int kIdHookDoubleSignature = SPLICE_MAX_HOOKS - 7;
+
+} // namespace
+
 TEST(IdRegistry, registers_and_looks_up_by_key) {
     // Use fresh keys to avoid collision with earlier tests in the same process.
     splice::IdRegistry::register_mapping("test_libX_funcA", 10001);
@@ -53,22 +71,25 @@ int fake_original_unary(int x) { return x + 1; }
 
 TEST(OriginalRegistry, set_and_get_round_trip) {
     using Fn = int (*)(int);
-    splice::OriginalRegistry::set_original<Fn>(30001, &fake_original_unary);
+    splice::OriginalRegistry::set_original<Fn>(kIdOriginalRoundTrip, &fake_original_unary);
 
-    auto got = splice::OriginalRegistry::get_original<Fn>(30001);
+    auto got = splice::OriginalRegistry::get_original<Fn>(kIdOriginalRoundTrip);
     ASSERT_NE(got, nullptr);
     EXPECT_EQ(got(41), 42);
 }
 
 TEST(OriginalRegistry, unknown_id_returns_nullptr) {
     using Fn = int (*)(int);
-    EXPECT_EQ(splice::OriginalRegistry::get_original<Fn>(999999), nullptr);
+    // In range, and nothing was ever stored at it -- which is the case this
+    // test is named for. It used to pass 999999, which under the array
+    // implementation exercises the out-of-range guard instead.
+    EXPECT_EQ(splice::OriginalRegistry::get_original<Fn>(kIdNothingStored), nullptr);
 }
 
 TEST(OriginalRegistry, lookup_by_key_resolves_via_id_registry) {
     using Fn = int (*)(int);
-    splice::IdRegistry::register_mapping("lookup_libX_funcB", 30002);
-    splice::OriginalRegistry::set_original<Fn>(30002, &fake_original_unary);
+    splice::IdRegistry::register_mapping("lookup_libX_funcB", kIdOriginalByKey);
+    splice::OriginalRegistry::set_original<Fn>(kIdOriginalByKey, &fake_original_unary);
 
     auto got = splice::OriginalRegistry::get_original_by_key<Fn>("lookup_libX_funcB");
     ASSERT_NE(got, nullptr);
@@ -82,7 +103,7 @@ int passthrough_plus_two(int x) { return x + 2; }
 }
 
 TEST(HookManager, invoke_without_callback_calls_original) {
-    auto& hook = splice::HookManager::get_hook<int, int>(40001);
+    auto& hook = splice::HookManager::get_hook<int, int>(kIdHookNoCallback);
 
     const int result = hook.invoke(&passthrough_plus_two, 5);
     EXPECT_EQ(result, 7);  // original: x + 2
@@ -90,7 +111,7 @@ TEST(HookManager, invoke_without_callback_calls_original) {
 
 TEST(HookManager, set_invoke_redirects_to_callback) {
     using Fn = int (*)(int);
-    auto& hook = splice::HookManager::get_hook<int, int>(40002);
+    auto& hook = splice::HookManager::get_hook<int, int>(kIdHookWithCallback);
 
     hook.set_invoke([](Fn orig, int x) {
         return orig(x) * 10;  // original is x+2, callback multiplies
@@ -111,8 +132,8 @@ TEST(HookManager, different_signatures_at_different_ids_are_independent) {
     using IntFn = int (*)(int);
     using DblFn = double (*)(double);
 
-    auto& hook_i = splice::HookManager::get_hook<int, int>(40003);
-    auto& hook_d = splice::HookManager::get_hook<double, double>(40004);
+    auto& hook_i = splice::HookManager::get_hook<int, int>(kIdHookIntSignature);
+    auto& hook_d = splice::HookManager::get_hook<double, double>(kIdHookDoubleSignature);
 
     hook_i.set_invoke([](IntFn, int x) { return x * 2; });
     hook_d.set_invoke([](DblFn, double x) { return x + 0.5; });

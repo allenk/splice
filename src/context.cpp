@@ -15,4 +15,14 @@ HookContext& default_context() noexcept {
     return ctx;
 }
 
+namespace detail {
+
+// The size this translation unit -- the one that owns the shared instance --
+// compiled HookContext to. Headers compare their own sizeof against it, which
+// catches a consumer built with a different SPLICE_REGISTRY_IMPL or
+// SPLICE_MAX_HOOKS before it reads the instance at the wrong offsets.
+std::size_t library_context_size() noexcept { return sizeof(HookContext); }
+
+} // namespace detail
+
 } // namespace splice

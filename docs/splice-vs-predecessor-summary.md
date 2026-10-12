@@ -27,7 +27,7 @@ disable semantics, and adds cross-platform support.
 | **Installer queue lifetime** | `static vector`, never cleared → tests miss dangling lambdas | **`InstallerToken` RAII**, O(1) release (Task #57) |
 | **Interruptible?** | No disable API | **Tier 1 / Tier 2 disable** (GOT/IAT pointer swap + inline atomic restore) |
 | **Policy selection** | Hard-coded | **Build-time `SPLICE_DEFAULT_POLICY`** + **per-call-site `SPLICE_HOOK_AS`** |
-| **Registry implementation selection** | Hard-coded | **Build-time `SPLICE_REGISTRY_IMPL`** (`shared_mutex_map` default / `rcu_atomic_array` opt-in) |
+| **Registry implementation selection** | Hard-coded | **Build-time `SPLICE_REGISTRY_IMPL`** (`rcu_atomic_array` default / `shared_mutex_map` for an unbounded registry) |
 | **ID system** | Per-TU `__COUNTER__` (**cross-TU id collisions are a latent bug**) | `SPLICE_UNIQUE_ID = __LINE__ << 16 \| __COUNTER__` + runtime `slot_for(trampoline_ptr)` (globally unique) |
 | **Trampoline generation** | 7 explicit specialisations (0/1/2/3/4/5/10 args) | 1 variadic template covering every arity |
 | **Logging** | Direct `__android_log_print` calls | Cross-platform `platform_log.h` substrate + hot-path throttling (`LOGD_EVERY_N`, `LOGV_ONCE`) |

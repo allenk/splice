@@ -327,7 +327,7 @@ include/splice/      Public API (header-only)
   core.h             InterceptorEntry<> + fluent modifiers + ScopedHook
   context.h          HookContext, HookStorage, HookRegistry (policy/registry)
   policy.h           rcu_writeonce / shared_mutex concurrency policies
-  registry_impl.h    SPLICE_REGISTRY_IMPL (shared_mutex_map / rcu_atomic_array)
+  registry_impl.h    SPLICE_REGISTRY_IMPL (rcu_atomic_array default / shared_mutex_map)
   trampoline.h       per-call-site trampoline generator
   traits.h           function_traits + member_function_traits
   diagnostics.h      SPLICE_TRACE / _COUNT / _TIME sugar

@@ -17,6 +17,14 @@ namespace {
 int sample_add1(int x) { return x + 1; }
 int sample_add2(int x) { return x + 2; }
 
+// Synthetic ids against the capacity, for the same reason as in
+// test_registry.cpp: the default registry is a fixed array of
+// SPLICE_MAX_HOOKS entries, so an id is an index. These contexts are local to
+// each test, so the values only have to be in range.
+constexpr int kIdIndependentHooks = SPLICE_MAX_HOOKS - 1;
+constexpr int kIdResetOriginals   = SPLICE_MAX_HOOKS - 2;
+constexpr int kIdResetHooks       = SPLICE_MAX_HOOKS - 3;
+
 } // namespace
 
 // ─── default_context singleton identity ─────────────────────────────────────
@@ -59,17 +67,17 @@ TEST(HookContext, hook_registries_are_independent) {
     splice::HookContext a;
     splice::HookContext b;
 
-    a.get_hook<int, int>(600).set_invoke([](int (*)(int), int x) {
+    a.get_hook<int, int>(kIdIndependentHooks).set_invoke([](int (*)(int), int x) {
         return x * 10;
     });
-    b.get_hook<int, int>(600).set_invoke([](int (*)(int), int x) {
+    b.get_hook<int, int>(kIdIndependentHooks).set_invoke([](int (*)(int), int x) {
         return x * 100;
     });
 
     // EXPECT_EQ is a variadic macro; extra parens protect the inner
     // `<int, int>` commas from being eaten as macro-argument separators.
-    EXPECT_EQ((a.get_hook<int, int>(600).invoke(nullptr, 3)), 30);
-    EXPECT_EQ((b.get_hook<int, int>(600).invoke(nullptr, 3)), 300);
+    EXPECT_EQ((a.get_hook<int, int>(kIdIndependentHooks).invoke(nullptr, 3)), 30);
+    EXPECT_EQ((b.get_hook<int, int>(kIdIndependentHooks).invoke(nullptr, 3)), 300);
 }
 
 TEST(HookContext, installer_queues_are_independent) {
@@ -109,11 +117,11 @@ TEST(HookContext, reset_clears_id_registry) {
 
 TEST(HookContext, reset_clears_originals) {
     splice::HookContext ctx;
-    ctx.set_original<int (*)(int)>(800, &sample_add1);
-    ASSERT_NE(ctx.get_original<int (*)(int)>(800), nullptr);
+    ctx.set_original<int (*)(int)>(kIdResetOriginals, &sample_add1);
+    ASSERT_NE(ctx.get_original<int (*)(int)>(kIdResetOriginals), nullptr);
 
     ctx.reset();
-    EXPECT_EQ(ctx.get_original<int (*)(int)>(800), nullptr);
+    EXPECT_EQ(ctx.get_original<int (*)(int)>(kIdResetOriginals), nullptr);
 }
 
 TEST(HookContext, reset_clears_installers) {
@@ -152,15 +160,15 @@ TEST(HookContext, reset_invalidates_outstanding_tokens) {
 
 TEST(HookContext, reset_clears_hooks) {
     splice::HookContext ctx;
-    ctx.get_hook<int, int>(900).set_invoke([](int (*)(int), int x) { return x * 5; });
-    EXPECT_EQ((ctx.get_hook<int, int>(900).invoke(nullptr, 2)), 10);
+    ctx.get_hook<int, int>(kIdResetHooks).set_invoke([](int (*)(int), int x) { return x * 5; });
+    EXPECT_EQ((ctx.get_hook<int, int>(kIdResetHooks).invoke(nullptr, 2)), 10);
 
     ctx.reset();
     // After reset, a fresh Hook<> is created — its default invoke calls
     // the original, not the previous callback.
-    ctx.set_original<int (*)(int)>(900, &sample_add1);
-    auto orig = ctx.get_original<int (*)(int)>(900);
-    EXPECT_EQ((ctx.get_hook<int, int>(900).invoke(orig, 7)), 8);
+    ctx.set_original<int (*)(int)>(kIdResetHooks, &sample_add1);
+    auto orig = ctx.get_original<int (*)(int)>(kIdResetHooks);
+    EXPECT_EQ((ctx.get_hook<int, int>(kIdResetHooks).invoke(orig, 7)), 8);
 }
 
 // ─── Thread safety ──────────────────────────────────────────────────────────

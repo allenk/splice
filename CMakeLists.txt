@@ -113,6 +113,32 @@ option(SPLICE_ENABLE_TSAN        "Enable ThreadSanitizer"                    OFF
 option(SPLICE_LOG_RUNTIME_LEVEL  "Compile in runtime log level switch"       ON)
 option(SPLICE_WARNINGS_AS_ERRORS "Promote warnings to errors"                OFF)
 
+# ─── Hot-path registry selection (FR-010 Step 6) ─────────────────────────────
+# Not an option(): these are string-valued, and they are applied to the splice
+# target as PUBLIC compile definitions so the library and every consumer of
+# `splice::splice` compile against one value -- including consumers that come
+# through install(EXPORT), since PUBLIC definitions are recorded in the
+# interface. That is structural, not advisory: the choice changes
+# sizeof(HookContext), and src/context.cpp owns the single instance of that
+# class the whole program shares.
+#
+# Before 2026-10-13 these were documented in the headers as `cmake -D...` and
+# nothing here consumed them, so the flags silently did nothing and the
+# lock-free registry had never been compiled.
+set(SPLICE_REGISTRY_IMPL "::splice::registry::rcu_atomic_array" CACHE STRING
+    "Hot-path registry: ::splice::registry::rcu_atomic_array (lock-free, default) or ::splice::registry::shared_mutex_map")
+set(SPLICE_MAX_HOOKS "512" CACHE STRING
+    "Capacity of the lock-free registries; installs beyond it are refused, not aborted")
+
+if(NOT SPLICE_REGISTRY_IMPL MATCHES "^::splice::registry::(rcu_atomic_array|shared_mutex_map)$")
+    message(FATAL_ERROR
+        "SPLICE_REGISTRY_IMPL must be ::splice::registry::rcu_atomic_array or "
+        "::splice::registry::shared_mutex_map, got '${SPLICE_REGISTRY_IMPL}'")
+endif()
+if(NOT SPLICE_MAX_HOOKS MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "SPLICE_MAX_HOOKS must be a positive integer, got '${SPLICE_MAX_HOOKS}'")
+endif()
+
 # ─── Architecture detection ──────────────────────────────────────────────────
 # ARM64 and x86_64 are the Phase 0 targets; ARM32/x86 are Phase 5 optional.
 set(SPLICE_TARGET_ARCH "unknown")
@@ -344,6 +370,16 @@ target_compile_definitions(splice PUBLIC
     $<$<CONFIG:Debug>:PLOG_LEVEL=0>
 )
 
+# The registry selection, carried to every consumer. PUBLIC is the whole point:
+# a consumer that compiled a different value would read the library's shared
+# HookContext at the wrong offsets, so the definition travels with the target
+# rather than being something each build has to repeat. splice/context.h checks
+# at first use that the library and the caller still agree.
+target_compile_definitions(splice PUBLIC
+    SPLICE_REGISTRY_IMPL=${SPLICE_REGISTRY_IMPL}
+    SPLICE_MAX_HOOKS=${SPLICE_MAX_HOOKS}
+)
+
 # ─── Tests ───────────────────────────────────────────────────────────────────
 if(SPLICE_BUILD_TESTS)
     enable_testing()
@@ -419,4 +455,6 @@ message(STATUS "  ASan              : ${SPLICE_ENABLE_ASAN}")
 message(STATUS "  UBSan             : ${SPLICE_ENABLE_UBSAN}")
 message(STATUS "  TSan              : ${SPLICE_ENABLE_TSAN}")
 message(STATUS "  Runtime log level : ${SPLICE_LOG_RUNTIME_LEVEL}")
+message(STATUS "  Registry          : ${SPLICE_REGISTRY_IMPL}")
+message(STATUS "  Max hooks         : ${SPLICE_MAX_HOOKS}")
 message(STATUS "─────────────────────────────────────────────────────────────")

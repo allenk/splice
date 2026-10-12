@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -88,6 +89,48 @@ struct GroupContribution {
 // installer registered by hand with no group path. A group is all or nothing,
 // so false refuses the whole call rather than quietly installing the rest.
 using GroupJoin = std::function<bool(GroupContribution&)>;
+
+// ─── Build-configuration guard ────────────────────────────────────────────
+// `library_context_size()` is defined in src/context.cpp, so it reports the
+// layout the *compiled library* sees. SPLICE_REGISTRY_IMPL and SPLICE_MAX_HOOKS
+// change sizeof(HookContext) -- 408 bytes against 4472 on x86_64 -- and
+// src/context.cpp owns the single HookContext every translation unit shares.
+// A consumer compiled with a different value would therefore read that
+// instance's members at the wrong offsets: no diagnostic, no crash, until a
+// function pointer read out of the originals table at the wrong offset is
+// called. The CMake option exists so this cannot happen; the check exists
+// because a hand-written -D can still try.
+std::size_t library_context_size() noexcept;
+
+// Templated so that `sizeof(ContextT)` is taken in the calling translation
+// unit rather than wherever this header was first included.
+//
+// Returns false on disagreement rather than ending the process. Splice is
+// loaded into someone else's program -- a game, an Android system service --
+// and std::abort() there is a dead host, which on Windows with a Debug CRT is
+// a dead host behind a modal dialog waiting for a human. A build mismatch is a
+// build mistake, and the honest response to it is the same as for any other
+// condition that makes installing impossible: log it and refuse. Callers must
+// check this *before* touching any member of the shared context, which is what
+// makes refusing safe -- on disagreement those members are not where this
+// translation unit believes they are, so none of them is read.
+template <typename ContextT>
+[[nodiscard]] inline bool context_layout_agrees() noexcept {
+    static const bool agrees = []() noexcept {
+        const std::size_t library = library_context_size();
+        if (library == sizeof(ContextT)) return true;
+        SPLICE_LOGE("splice: build mismatch -- this translation unit sees "
+                    "sizeof(HookContext)=%zu and libsplice was built with %zu. "
+                    "SPLICE_REGISTRY_IMPL and SPLICE_MAX_HOOKS must be the same "
+                    "for the library and every consumer; link splice::splice and "
+                    "it carries them. Every hook from this translation unit is "
+                    "refused: reading the shared context at these offsets would "
+                    "dispatch through a pointer taken from the wrong place.",
+                    sizeof(ContextT), library);
+        return false;
+    }();
+    return agrees;
+}
 
 } // namespace detail
 
@@ -330,6 +373,9 @@ public:
         return m_hooks.size();
     }
 
+    // A map takes any id, so this implementation imposes no capacity.
+    static constexpr int kCapacity = (std::numeric_limits<int>::max)();
+
 private:
     mutable std::shared_mutex                                m_mutex;
     std::unordered_map<int, std::shared_ptr<HookBase>>       m_hooks;
@@ -433,6 +479,10 @@ public:
         return n;
     }
 
+    // Fixed-size snapshot: the id *is* the index, so this is a hard
+    // capacity. HookContext::slot_for will not issue a slot beyond it.
+    static constexpr int kCapacity = static_cast<int>(SPLICE_MAX_HOOKS);
+
 private:
     struct Snapshot {
         std::array<std::shared_ptr<HookBase>, SPLICE_MAX_HOOKS> slots{};
@@ -440,11 +490,21 @@ private:
 
     template <typename HookT>
     HookT& install_slot(int id) {
-        if (id < 0 || id >= static_cast<int>(SPLICE_MAX_HOOKS)) {
-            SPLICE_LOGE("rcu_atomic_array: hook id=%d out of [0, %d). "
-                        "Rebuild with -DSPLICE_MAX_HOOKS=<larger>.",
-                        id, static_cast<int>(SPLICE_MAX_HOOKS));
-            std::abort();
+        if (id < 0 || id >= kCapacity) {
+            // Defensive only, and deliberately not fatal any more.
+            // HookContext::slot_for refuses to issue a slot at or beyond
+            // kCapacity, so a well-formed install cannot reach this branch.
+            // It used to call std::abort(), which turned a capacity limit into
+            // a dead consumer process -- inside a game, or inside a system
+            // service. A capacity limit is expressible as a refused install,
+            // every install already returns an outcome, and that is where it
+            // is reported now. What is left here is a log and an inert slot.
+            SPLICE_LOGE("rcu_atomic_array: hook id=%d outside [0, %d) -- "
+                        "ignored. Raise SPLICE_MAX_HOOKS for a build that needs "
+                        "more than %d hook sites.",
+                        id, kCapacity, kCapacity);
+            static HookT inert;
+            return inert;
         }
 
         std::lock_guard lock(m_write_mutex);
@@ -541,6 +601,9 @@ public:
         return m_map.size();
     }
 
+    // As above: an unbounded map imposes no capacity.
+    static constexpr int kCapacity = (std::numeric_limits<int>::max)();
+
 private:
     mutable std::shared_mutex          m_mutex;
     std::unordered_map<int, void*>     m_map;
@@ -549,18 +612,26 @@ private:
 template <>
 class OriginalsRegistry<registry::rcu_atomic_array> {
 public:
+    // Same capacity as the hook registry, and the same contract since
+    // 2026-10-13: out of range is logged and ignored on both sides. Before
+    // that the two disagreed -- the hooks side aborted the process and this
+    // side returned, which meant the same programming error killed a program
+    // in two different ways depending on which registry reached it first.
+    static constexpr int kCapacity = static_cast<int>(SPLICE_MAX_HOOKS);
+
     void set(int id, void* p) noexcept {
-        if (id < 0 || id >= static_cast<int>(SPLICE_MAX_HOOKS)) {
-            SPLICE_LOGE("rcu_atomic_array originals: id=%d out of [0, %d). "
-                        "Rebuild with -DSPLICE_MAX_HOOKS=<larger>.",
-                        id, static_cast<int>(SPLICE_MAX_HOOKS));
-            return;   // best-effort; trampoline will see nullptr
+        if (id < 0 || id >= kCapacity) {
+            SPLICE_LOGE("rcu_atomic_array originals: id=%d outside [0, %d) -- "
+                        "ignored. Raise SPLICE_MAX_HOOKS for a build that needs "
+                        "more than %d hook sites.",
+                        id, kCapacity, kCapacity);
+            return;   // the trampoline will see nullptr; the install is refused
         }
         m_slots[static_cast<std::size_t>(id)].store(p, std::memory_order_release);
     }
 
     [[nodiscard]] void* get(int id) const noexcept {
-        if (id < 0 || id >= static_cast<int>(SPLICE_MAX_HOOKS)) return nullptr;
+        if (id < 0 || id >= kCapacity) return nullptr;
         return m_slots[static_cast<std::size_t>(id)].load(std::memory_order_acquire);
     }
 
@@ -690,10 +761,37 @@ public:
     //
     // m_unique_id from __COUNTER__ stays as a debug-log identifier
     // (IdRegistry::register_mapping) but no longer drives registry access.
+    // The smaller of the two registries' capacities: the trampoline reads one
+    // of each per call, so a slot has to be valid in both.
+    static constexpr int kSlotCapacity =
+        HookRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
+                < OriginalsRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
+            ? HookRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
+            : OriginalsRegistry<SPLICE_REGISTRY_IMPL>::kCapacity;
+
+    // Returns -1 when no slot can be issued: the configured capacity is
+    // exhausted, or this translation unit disagrees with the library about the
+    // context's layout. Callers treat that as a refused install -- see
+    // InterceptorEntry::refusal_reason() and the group's prepare stage.
+    // Handing out a slot the registries cannot hold would publish a hook the
+    // trampoline then fails to resolve, which is the one outcome worse than
+    // not installing.
+    //
+    // The layout check comes first, before any member is touched, because on
+    // disagreement the members are not at the offsets this translation unit
+    // computed -- including the mutex the next line would lock.
     [[nodiscard]] int slot_for(void* trampoline_ptr) {
+        if (!detail::context_layout_agrees<HookContext>()) return -1;
         std::unique_lock lock(m_mutex);
         auto it = m_slot_by_trampoline.find(trampoline_ptr);
         if (it != m_slot_by_trampoline.end()) return it->second;
+        if (m_next_slot >= kSlotCapacity) {
+            SPLICE_LOGE("splice: no registry slot left -- %d hook sites are in "
+                        "use and that is the configured capacity. Rebuild with a "
+                        "larger SPLICE_MAX_HOOKS; this install is refused rather "
+                        "than guessed at.", kSlotCapacity);
+            return -1;
+        }
         const int slot = m_next_slot++;
         m_slot_by_trampoline[trampoline_ptr] = slot;
         return slot;

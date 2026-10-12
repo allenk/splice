@@ -343,8 +343,13 @@ SPLICE_HOOK_AS(splice::policy::shared_mutex, my_func)
 
 | Impl | Reader 成本 | 8t/1t scaling | 寫操作 |
 |---|---|---|---|
-| `splice::registry::shared_mutex_map`（**預設**）| shared_lock + map find | ~50× | unique_lock |
-| `splice::registry::rcu_atomic_array` | pure atomic load + array index | **~4×** ✅ | copy snapshot + atomic publish + 100ms 延遲回收 |
+| `splice::registry::rcu_atomic_array`（**預設**，2026-10-13 起）| pure atomic load + array index | **~4.5×** | copy snapshot + atomic publish + 100ms 延遲回收 |
+| `splice::registry::shared_mutex_map` | shared_lock + map find | ~60× | unique_lock |
+
+2026-10-13 實測（Ryzen 9 9950X3D，Release，同一個 commit、只差這個選擇、
+先全部編完再靜置量測、三輪交錯，取中位數）：單執行緒 hooked callback
+**4.3 ns** 對 23.3 ns，8 執行緒 **19 ns** 對約 1400 ns。上鎖的 map 曾是預設，
+而它佔掉單執行緒派送成本的約 **91%**。
 
 build-time 切：
 ```bash
@@ -480,8 +485,8 @@ splice::InstallerToken t = splice::register_global_installer(fn);
 | Macro / Var | 預設 | 作用 |
 |---|---|---|
 | `SPLICE_DEFAULT_POLICY` | `::splice::policy::rcu_writeonce` | callback storage 預設 policy |
-| `SPLICE_REGISTRY_IMPL` | `::splice::registry::shared_mutex_map` | registry 實作 |
-| `SPLICE_MAX_HOOKS` | 512 | rcu_atomic_array snapshot 上限 |
+| `SPLICE_REGISTRY_IMPL` | `::splice::registry::rcu_atomic_array` | registry 實作。真正的 CMake option，以 PUBLIC 方式傳遞給 consumer |
+| `SPLICE_MAX_HOOKS` | 512 | rcu_atomic_array 容量。超過的 hook site 會被**拒絕安裝**並記錄原因 |
 | `SPLICE_RCU_GRACE_PERIOD_MS` | 100 | RCU snapshot 回收 grace period |
 | `SPLICE_LOG_TAG` | `"splice"` | log tag 字串 |
 | `SPLICE_BUILD_TESTS` | ON | 編 unit tests |
@@ -526,15 +531,22 @@ cmake --preset=android-arm64-release \
 
 完整 bench：[`fr-010-performance-summary.md`](./fr-010-performance-summary.md)
 
-### Hot-path cost breakdown（Windows 22.0 ns）
+### Hot-path cost（Windows，2026-10-13 實測）
 
-| 元件 | ns | 備註 |
-|---|---|---|
-| Trampoline 進出 | ~2 | jmp rel32 + saved prologue + return |
-| `get_original(slot)` | 1.3 | atomic load on shared_mutex_map（0.3 in RCU mode）|
-| `get_hook_as<...>(slot)` | 1.0 | 同上 |
-| `std::function::operator()` | 1.4 | dispatch — Step 5 microbench 證實這不是瓶頸 |
-| Callback body + `orig(x)` | ~16 | depends on user lambda |
+| | ns |
+|---|---|
+| 同一個 target，未 hook | 2.37 |
+| hooked callback，預設（無鎖）registry | **4.3** |
+| splice 加上去的全部成本 | **1.9** |
+| 同上，但用 `shared_mutex_map` | 23.3，所以 splice 加了 21 |
+
+那 1.9 ns 包含 trampoline 的進出、兩次 registry 查找、`std::function` 的
+dispatch，以及 callback 自己呼叫 original。**它沒有被再細分**，而這張表的前一版
+聲稱細分過了 —— 兩次查找記成 1.3 ns 與 1.0 ns，剩下約 16 ns 記在「callback
+body」，而那個 callback 是對一個極簡 target 的 passthrough lambda。那兩個查找的
+數字其實是無鎖版的成本被標成上鎖版的，而那 16 ns 就是鎖。錯誤只有一個源頭，記在
+[`fr-010-step6-bench-results.md`](./fr-010-step6-bench-results.md)：文件教的
+registry 切換方式沒有作用，所以以為在比較兩種實作的量測，比的是同一種。
 
 ---
 
@@ -569,9 +581,14 @@ SPLICE_HOOK(printf).onInvoke([](auto orig, const char* fmt, ...) {
 
 ### 9.3 `recursive_mutex` 風險
 
-不要在 hook callback 內持有其他鎖然後等鎖（容易 deadlock）。Splice hook
-本身會 take 一個 reader-lock（shared_mutex_map mode）— 在 callback 內再去
-take writer-lock 並期待其他 reader 出去，會卡死。
+不要在 hook callback 內持有其他鎖然後等鎖（容易 deadlock）。
+
+這一節原本說「Splice hook 本身會 take 一個 reader-lock」—— 那只在
+`shared_mutex_map` 模式下成立，而 2026-10-13 起預設是無鎖的
+`rcu_atomic_array`：派送路徑上是兩次 acquire-load，沒有任何鎖。只有明確選了
+`shared_mutex_map` 的 build 才會在 callback 外層持有 reader-lock，此時在
+callback 內再去 take writer-lock 並期待其他 reader 出去，會卡死。無論哪一種，
+在 callback 內等一把別人持有的鎖都是壞主意。
 
 ### 9.4 Tier 2 disable 的記憶體 leak 是 **設計上**的
 
@@ -802,9 +819,17 @@ the predecessor framework 時代的經驗：**hook 該被當成獨立模組組�
 
 ### Q3. 為什麼預設不用最快的 RCU registry？
 
-RCU 有 trade-off（writer 慢 10×、記憶體 ~2× 暫時、AOSP toolchain 風險）。99%
-使用者只跑 1-2 個 thread，預設 `shared_mutex_map` 就夠。重度多線程場景再
-opt-in `rcu_atomic_array`。這是「safe default + powerful opt-in」原則。
+**2026-10-13 起已經是預設了。** 這段原本說 RCU 有 trade-off（writer 慢、記憶體
+暫時變多、toolchain 風險），而「99% 使用者只跑 1-2 個 thread，預設
+`shared_mutex_map` 就夠」。前半仍然成立，後半是錯的：上鎖的 map 佔單執行緒派送
+成本的約 **91%**（23.3 ns 對 4.3 ns），所以單執行緒的使用者付得最兇。沒人發現，
+是因為文件教的切換方式只設了一個沒有任何 CMake 檔案讀取的 cache 變數 —— 那個
+比較從來沒有被真正編譯過，包含 FR-010 報告裡為它發表的數字。
+
+無鎖版的代價，講清楚：固定容量（`SPLICE_MAX_HOOKS`，預設 512 個 hook site，超過
+就拒絕安裝並說明原因）、4 KiB 的表、每次 install 複製 8 KiB 的 snapshot、以及
+100 ms 的回收寬限期。`shared_mutex_map` 仍然支援，給需要無上界 registry 或
+writer 立即可見的人。原則沒變，變的是量測。
 
 ### Q4. 為什麼 callback 還用 std::function 而不是 template？
 

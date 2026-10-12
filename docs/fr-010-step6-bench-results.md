@@ -2,6 +2,33 @@
 
 **Status:** Data complete
 **FR:** FR-010 Step 6.3 (contended bench validates the 8t/1t < 5× gate)
+
+> ## Correction, 2026-10-13: the "RCU" column was not an RCU build
+>
+> **The full-trampoline comparison in this report measured one configuration
+> twice.** Selecting the registry was documented as
+> `cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array`, and that
+> form creates a CMake cache variable which nothing in the build system read.
+> The tree this report names still exists, with `SPLICE_REGISTRY_IMPL:
+> UNINITIALIZED` in its cache and zero occurrences of `rcu_atomic_array` in its
+> compile commands. Both of its columns were `shared_mutex_map`, and the 10%
+> between them was noise.
+>
+> **So the analysis below is wrong where it subtracts.** "The rest of the
+> trampoline = 913 ns at 8 threads", the four suspects proposed for it, and the
+> recommendation to profile, all follow from excluding a registry that had
+> never been excluded. Measured 2026-10-13 with the define actually reaching
+> the compiler, on the same machine and the same benchmark: **8-thread dispatch
+> is 19 ns, not 923**, and single-thread dispatch is 4.3 ns against 23.3 for the
+> locked map. There is no residual to explain. The bouncer this report went
+> looking for was the lock it had just ruled out.
+>
+> What stands: the **registry-isolated** numbers below, because
+> `bench_registry_lookup.cpp` instantiates both implementations explicitly in
+> one binary and never depended on the macro. They reproduce today.
+>
+> The escape hatch is now a real CMake option, and `rcu_atomic_array` is the
+> default.
 **Test date:** 2026-05-26
 **Author:** Allen Kuo
 **Read with:**

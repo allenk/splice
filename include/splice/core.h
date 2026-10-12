@@ -315,10 +315,25 @@ private:
         OriginalRegistry::set_original(ctx->self->m_slot, ctx->self->m_original);
     }
 
+    // Why this entry cannot install, or nullptr when it can. Two reasons so
+    // far, and both are capacity rather than error: the 64 re-entrancy scopes
+    // and the registry's slots. Keeping them in one place is what stopped the
+    // second one from being a std::abort() inside the registry.
+    [[nodiscard]] const char* refusal_reason() const noexcept {
+        if (m_slot < 0) {
+            return "no registry slot was issued -- either the configured "
+                   "capacity is in use (SPLICE_MAX_HOOKS) or this build "
+                   "disagrees with libsplice about SPLICE_REGISTRY_IMPL; the "
+                   "log line from HookContext says which";
+        }
+        if (m_refused) return "no re-entrancy scope was available (64 in use)";
+        return nullptr;
+    }
+
     void install() {
-        if (m_refused) {
-            SPLICE_LOGE("Hook install REFUSED: %s::%s — no re-entrancy scope was available",
-                        m_lib.c_str(), m_sym.c_str());
+        if (const char* why = refusal_reason()) {
+            SPLICE_LOGE("Hook install REFUSED: %s::%s — %s",
+                        m_lib.c_str(), m_sym.c_str(), why);
             return;
         }
         PrePatchCtx ctx{this};
@@ -352,9 +367,9 @@ private:
     //   - the record arrives afterwards, and may arrive as null, which is how
     //     this entry is told it is not installed after all.
     bool join_group(detail::GroupContribution& out) {
-        if (m_refused) {
-            SPLICE_LOGE("Hook cannot join a group: %s::%s -- no re-entrancy "
-                        "scope was available", m_lib.c_str(), m_sym.c_str());
+        if (const char* why = refusal_reason()) {
+            SPLICE_LOGE("Hook cannot join a group: %s::%s -- %s",
+                        m_lib.c_str(), m_sym.c_str(), why);
             return false;
         }
         if (m_installed) {
@@ -405,9 +420,9 @@ private:
             SPLICE_LOGE("install_direct: no address provided");
             return;
         }
-        if (m_refused) {
-            SPLICE_LOGE("Hook install REFUSED (direct): %p — no re-entrancy scope was available",
-                        m_direct_addr);
+        if (const char* why = refusal_reason()) {
+            SPLICE_LOGE("Hook install REFUSED (direct): %p — %s",
+                        m_direct_addr, why);
             return;
         }
         PrePatchCtx ctx{this};
@@ -445,9 +460,9 @@ private:
         m_pending_gates = {};
 
         m_refused = gates.unsatisfiable();
-        if (m_refused) {
-            SPLICE_LOGE("non_reentrant: no re-entrancy scope available (64 in use); "
-                        "this hook will not install (id=%d)", m_unique_id);
+        if (const char* why = refusal_reason()) {
+            SPLICE_LOGE("hook callback not stored (id=%d): %s -- this hook will "
+                        "not install", m_unique_id, why);
             return;
         }
 

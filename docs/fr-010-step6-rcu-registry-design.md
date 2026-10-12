@@ -23,6 +23,18 @@
    escape hatch**. RCU is by nature a functional trade-off (writers pay more,
    old data is reclaimed late, peak memory is higher) and should not be imposed
    on every user.
+> **Correction, 2026-10-13.** Two decisions below did not survive being
+> tested. The escape hatch described in point 4 was documented as
+> `cmake -DSPLICE_REGISTRY_IMPL=...`, which creates a CMake cache variable that
+> no file in the build system consumed -- so the flag silently did nothing and
+> the implementation this document designs had never been compiled. It is now a
+> real CMake option, applied to the target as a PUBLIC compile definition and
+> carried to consumers. And `shared_mutex_map` is no longer the default: with
+> the define actually landing, single-thread dispatch is 4.3 ns against 23.3,
+> so the locked map was about 91% of the cost. The snapshot bound is now a
+> refused install rather than a `std::abort()`. Everything else in this
+> document still describes the implementation.
+
 4. **Escape-hatch design:** a build-time macro, `SPLICE_REGISTRY_IMPL`,
    parallel to Step 3's `SPLICE_DEFAULT_POLICY`. **The default keeps the
    current behaviour** (`shared_mutex_map`); `rcu_atomic_array` is opt-in. No

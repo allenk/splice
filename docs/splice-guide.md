@@ -419,13 +419,38 @@ The entire HookContext lookup table is also pluggable:
 
 | Impl | Reader cost | 8t/1t scaling | Writer |
 |---|---|---|---|
-| `splice::registry::shared_mutex_map` (**default**) | shared_lock + map find | ~50× | unique_lock |
-| `splice::registry::rcu_atomic_array` | pure atomic load + array index | **~4×** ✅ | copy snapshot + atomic publish + 100ms deferred reclaim |
+| `splice::registry::rcu_atomic_array` (**default** since 2026-10-13) | pure atomic load + array index | **~4.5×** | copy snapshot + atomic publish + 100 ms deferred reclaim |
+| `splice::registry::shared_mutex_map` | shared_lock + map find | ~60× | unique_lock |
 
-Switch at build time:
+Measured 2026-10-13 on a Ryzen 9 9950X3D, Windows, VS2022 Release, one commit
+with the registry as the only difference between the two binaries, built first
+and then measured in three interleaved rounds on a settled machine (medians):
+
+| | `rcu_atomic_array` (default) | `shared_mutex_map` |
+|---|---|---|
+| unhooked call | 2.36 ns | 2.40 ns |
+| hooked callback, 1 thread | **4.3 ns** | 23.3 ns |
+| hooked callback, 8 threads | **19 ns** | ~1400 ns |
+| 8t/1t | **4.5x** | ~60x |
+
+The locked map was the default until 2026-10-13 and cost about **91% of all
+single-thread dispatch**. It is kept as the escape hatch: unbounded, no
+reclamation, immediate visibility.
+
+Switch at build time, and note that this is one choice for the whole program:
+
 ```bash
-cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
+cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::shared_mutex_map
 ```
+
+That is a real CMake option. It is applied to the `splice` target as a PUBLIC
+compile definition and travels with `splice::splice`, including through
+`install(EXPORT)`, so the library and every consumer agree by construction.
+They have to: the choice changes `sizeof(HookContext)`, and the compiled
+library owns the single instance of that class the whole program shares. If
+something sets the macro by hand anyway, Splice detects the disagreement at
+first use, logs it, and **refuses every hook from the translation unit that
+disagrees** rather than reading the shared context at the wrong offsets.
 
 ---
 
@@ -594,8 +619,8 @@ splice::InstallerToken t = splice::register_global_installer(fn);
 | Macro / Var | Default | Effect |
 |---|---|---|
 | `SPLICE_DEFAULT_POLICY` | `::splice::policy::rcu_writeonce` | Default callback storage policy |
-| `SPLICE_REGISTRY_IMPL` | `::splice::registry::shared_mutex_map` | Registry implementation |
-| `SPLICE_MAX_HOOKS` | 512 | `rcu_atomic_array` snapshot bound |
+| `SPLICE_REGISTRY_IMPL` | `::splice::registry::rcu_atomic_array` | Registry implementation. A real CMake option, applied PUBLIC and carried to consumers |
+| `SPLICE_MAX_HOOKS` | 512 | `rcu_atomic_array` capacity. Hook sites beyond it are **refused**, with the reason logged |
 | `SPLICE_SLOT_STUBS_PER_SIGNATURE` | 8 | Live `splice::Vtable` sites per signature |
 | `SPLICE_RCU_GRACE_PERIOD_MS` | 100 | RCU snapshot reclamation grace period |
 | `SPLICE_LOG_TAG` | `"splice"` | Log tag string |
@@ -641,15 +666,25 @@ Hardware: AMD Ryzen 9 9950X3D (Windows) / Snapdragon 8 Gen 3 (ARM64)
 
 Full bench: [`fr-010-performance-summary.md`](./fr-010-performance-summary.md)
 
-### Hot-path cost breakdown (Windows 22.0 ns)
+### Hot-path cost (Windows, measured 2026-10-13)
 
-| Component | ns | Notes |
-|---|---|---|
-| Trampoline entry/exit | ~2 | jmp rel32 + saved prologue + return |
-| `get_original(slot)` | 1.3 | atomic load on shared_mutex_map (0.3 in RCU mode) |
-| `get_hook_as<...>(slot)` | 1.0 | same |
-| `std::function::operator()` | 1.4 | dispatch — Step 5 microbench proves this is not the bottleneck |
-| Callback body + `orig(x)` | ~16 | depends on the user lambda |
+| | ns |
+|---|---|
+| unhooked call to the same target | 2.37 |
+| hooked callback, default (lock-free) registry | **4.3** |
+| everything Splice adds | **1.9** |
+| the same, with `shared_mutex_map` | 23.3, so Splice adds 21 |
+
+That 1.9 ns covers the trampoline's entry and exit, both registry lookups, the
+`std::function` dispatch and the callback's own call to the original. **It has
+not been subdivided**, and the previous version of this table claimed to have
+subdivided it -- billing 1.3 ns and 1.0 ns for the two lookups and about 16 ns
+to "callback body", for a passthrough lambda over a trivial target. Those
+lookup figures were lock-free costs labelled as locked ones, and the 16 ns was
+the locks. The error had one source, described in
+[`fr-010-step6-bench-results.md`](./fr-010-step6-bench-results.md): the
+documented way to select the registry did nothing, so measurements believed to
+compare the two implementations compared one implementation with itself.
 
 ---
 
@@ -700,9 +735,14 @@ original instead of back into the callback. When the nested call reaches a
 ### 9.3 Locking hazards
 
 Don't hold other locks inside a hook callback and then wait on them
-(easy way to deadlock). Splice itself takes a reader-lock on the hot path
-(under shared_mutex_map mode) — acquiring a writer-lock inside the callback
-and expecting other readers to exit will hang.
+(easy way to deadlock).
+
+Splice itself takes a reader-lock on the hot path **only under
+`shared_mutex_map`**; the default since 2026-10-13 is the lock-free
+`rcu_atomic_array`, whose dispatch takes no lock at all. Where the locked
+registry is selected, acquiring a writer-lock inside the callback and expecting
+other readers to exit will hang. Either way, waiting inside a callback on a
+lock someone else holds is a bad idea.
 
 ### 9.4 Tier 2 disable's memory leak is **by design**
 
@@ -947,10 +987,22 @@ with it.
 
 ### Q3. Why isn't the fastest RCU registry the default?
 
-RCU has trade-offs (writer 10× slower, transient ~2× memory, AOSP toolchain
-risk). 99% of users run with 1–2 threads where the default `shared_mutex_map`
-is plenty. Heavy-multi-thread scenarios opt in to `rcu_atomic_array`.
-Principle: **safe default + powerful opt-in**.
+**It is, since 2026-10-13.** This answer used to say that RCU had trade-offs --
+a slower writer, transient memory, toolchain risk -- and that 99% of users run
+one or two threads where the locked map "is plenty". The first half is still
+true and the second half was wrong: the locked map costs about **91% of
+single-thread dispatch**, 23.3 ns against 4.3, so a single-threaded user was
+paying the most for it. Nobody noticed because the documented way to switch
+registries set a CMake cache variable that nothing consumed, so the comparison
+had never actually been compiled -- including by the FR-010 reports that
+published numbers for it.
+
+What the lock-free registry costs, stated plainly: a fixed capacity
+(`SPLICE_MAX_HOOKS`, default 512 hook sites, beyond which installs are refused
+and say so), a 4 KiB table, an 8 KiB snapshot copy per install, and a 100 ms
+reclamation grace period. `shared_mutex_map` remains supported for anyone who
+needs an unbounded registry or immediate writer visibility. The principle is
+unchanged; the measurement is what moved.
 
 ### Q4. Why is the callback still `std::function` rather than a template?
 

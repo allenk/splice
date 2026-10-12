@@ -25,6 +25,25 @@ Verify the hypothesis with a microbenchmark before acting; do not attack
 
 ---
 
+> ## Correction, 2026-10-13
+>
+> The Step 6 column below reports full-trampoline numbers that were measured
+> without the lock-free registry compiled in -- the documented
+> `cmake -DSPLICE_REGISTRY_IMPL=...` set a cache variable nothing consumed, so
+> the build silently used the default. See the correction at the top of
+> [`fr-010-step6-bench-results.md`](./fr-010-step6-bench-results.md).
+>
+> Measured 2026-10-13 with the define landing, same machine, same benchmarks:
+> single-thread hooked call **4.3 ns** (gate: < 20 ns) and 8t/1t **4.5×**
+> (gate: < 5×). **Both FR-010 gates are met**, by the registry change this
+> series designed and never actually built. The † footnote below, which
+> attributes the 8-thread number to "a different bench shape", is withdrawn:
+> the number was the lock.
+>
+> The one-sentence lesson at the top of this document survives intact, and is
+> sharper than it was: the win was in the synchronisation layer, and it was
+> larger than this document could see.
+
 ## TL;DR
 
 | Metric | Start (pre-FR-010) | Step 3.5 | Step 6 | Target |

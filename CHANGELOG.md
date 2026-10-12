@@ -6,6 +6,50 @@ All notable changes to Splice are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **The lock-free registry (`rcu_atomic_array`) is now the default.** Measured
+  on one commit with the registry as the only difference: single-thread
+  callback dispatch **4.3 ns against 23.3**, 8-thread dispatch **19 ns against
+  about 1400**, and an 8t/1t ratio of **4.5x against about 60x**. The locked
+  `shared_mutex_map` was about 91% of all single-thread dispatch cost. Both
+  FR-010 performance gates (< 20 ns single-thread, < 5x 8t/1t) are met for the
+  first time. `shared_mutex_map` remains supported for an unbounded registry or
+  immediate writer visibility.
+- `SPLICE_REGISTRY_IMPL` and `SPLICE_MAX_HOOKS` are now **real CMake cache
+  options**, validated at configure time and applied to the `splice` target as
+  PUBLIC compile definitions, so they travel with `splice::splice` and through
+  `install(EXPORT)`. The choice changes `sizeof(HookContext)` and the compiled
+  library owns the instance every translation unit shares, so it has to be one
+  choice for the whole program rather than a per-target flag.
+- Exceeding the lock-free registry's capacity is now a **refused install** with
+  the reason logged, on both the hook and original sides. Previously the two
+  disagreed: the hook side called `std::abort()` and the originals side returned
+  silently, leaving the trampoline a null original -- the same programming error
+  ended the process in two different ways depending on which path reached it
+  first. A hook library is loaded into someone else's program, where `abort()`
+  is a dead host, and every install already returns an outcome that can carry a
+  refusal.
+
+### Fixed
+- **`cmake -DSPLICE_REGISTRY_IMPL=...` did nothing.** It created a CMake cache
+  variable that no file in the build system consumed, so every build compiled
+  the default registry no matter what was passed, and the `-DSPLICE_MAX_HOOKS=`
+  advice in the out-of-range error message was equally inert. Both are now
+  consumed, validated, and a misspelled value fails at configure time instead
+  of compiling something unintended.
+- A build whose translation units disagree about `SPLICE_REGISTRY_IMPL` or
+  `SPLICE_MAX_HOOKS` is now **detected and refused** instead of reading the
+  shared `HookContext` at the wrong offsets. The two configurations differ by
+  more than ten times in `sizeof(HookContext)`, and the failure had no
+  diagnostic and no crash until a function pointer taken from the wrong offset
+  was called.
+- Corrected the performance figures in `docs/fr-010-step6-bench-results.md`,
+  `docs/fr-010-performance-summary.md` and the hot-path breakdown in
+  `docs/splice-guide.md`. All three attributed numbers to the lock-free
+  registry that were measured without it, for the reason above; the guide's
+  breakdown billed two locked lookups at 2.3 ns together when they cost about
+  19, and handed the difference to "callback body".
+
 ### Added
 - `splice::Vtable<Interface>` in the new `<splice/live.h>`: hook several virtual
   methods of a live object by name, in one all-or-nothing transaction, with the

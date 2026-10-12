@@ -772,12 +772,23 @@ public:
             return;
         }
 
+        const int registry_slot = default_context().slot_for(stub);
+        if (registry_slot < 0) {
+            SPLICE_LOGE("splice: site %zu cannot be given a registry slot (the "
+                        "configured capacity is in use); refusing rather than "
+                        "installing a hook the trampoline cannot resolve",
+                        site.ordinal);
+            detail::StubPool<FuncType, Policy>::release(stub);
+            fail(Stage::prepare, Operation::none, 0, site);
+            return;
+        }
+
         detail::PendingSite pending;
         pending.site = site;
         pending.slot = slot;
         pending.target = target;
         pending.stub = stub;
-        pending.registry_slot = default_context().slot_for(stub);
+        pending.registry_slot = registry_slot;
         pending.expected = expected;
         pending.expect_set = expect_set;
         pending.expected_prologue = expected_prologue;
