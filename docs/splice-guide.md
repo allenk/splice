@@ -425,9 +425,10 @@ The entire HookContext lookup table is also pluggable:
 Measured 2026-10-13 on a Ryzen 9 9950X3D, Windows, VS2022 Release, one commit
 with the registry as the only difference between the two binaries, built first
 and then measured in three interleaved rounds on a settled machine (medians).
-**On ARM64 the difference is an order of magnitude larger** -- 11.95 ns against
-100.8 at one thread and 250x at six, with the lock-free registry flat at
-6t/1t = 1.00x; see
+**On ARM64 the gap between the two registries is an order of magnitude wider**
+-- 4.6 ns against 71.9 on a Snapdragon 8 Gen 3, and 228x at eight threads --
+while the lock-free path itself costs the same 1.9 ns over an unhooked call as
+it does here, so there is no ARM64 penalty left to pay. See
 [`fr-010-step6-bench-results.md`](./fr-010-step6-bench-results.md) for that
 board and its protocol.
 

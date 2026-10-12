@@ -219,6 +219,65 @@ builds clean with no warnings from the registry or context headers, and runs
 failures on ARM64 that have nothing to do with the registry. The install took
 the real ARM64 atomic path (`atomic_install: done`), not a fallback.
 
+### Android, on the shipping target
+
+Measured the same day on a **Snapdragon 8 Gen 3 / Android 14** device
+(`arm64-v8a`, 8 cores, prime core 3.30 GHz), NDK r29 clang, Release, using
+**this repository's own Google Benchmark binaries** rather than a standalone
+harness -- so these numbers are comparable line-for-line with the x86_64 ones.
+Three interleaved rounds, medians:
+
+| | `shared_mutex_map` | `rcu_atomic_array` |
+|---|---|---|
+| `BM_RawCall` | 2.73 ns | 2.73 ns |
+| `BM_HookedCall_Active` | 71.9 / 74.5 / 75.5 ns | **4.54 / 4.62 / 4.69 ns** |
+| contended, 1 thread | 72.6 / 74.6 / 75.7 | 4.55 / 4.68 / 4.72 |
+| contended, 2 | 320 / 385 / 393 | 5.13 / 5.25 / 5.33 |
+| contended, 4 | 818 / 791 / 791 | 5.83 / 6.01 / 6.10 |
+| contended, 8 | 1822 / 1799 / 1774 | **7.88 / 7.88 / 7.91** |
+
+**The headline is what splice costs over an unhooked call: 1.9 ns** (4.6 against
+2.73). That is the same 1.9 ns it costs on the 9950X3D. **There is no residual
+ARM64 dispatch penalty once the lock is gone** -- which is worth stating plainly
+next to the Jetson table above, because that table's "order of magnitude" is
+the *ratio between the two registries*, not a cost the lock-free path carries.
+8t/1t is 1.7x, against the < 5x gate; single-thread 4.6 ns against < 20 ns.
+
+What *is* far worse on ARM64 is the locked map, and `bench_registry_lookup` on
+the device says why -- both implementations compiled into one binary, so this
+needs no rebuild:
+
+| lookup | 1 thread | 2 | 4 | 8 |
+|---|---|---|---|---|
+| hooks, `shared_mutex_map` | **36.8 ns** | 284 | 321 | 967 |
+| hooks, `rcu_atomic_array` | 3.35 | 3.11 | 3.20 | 3.86 |
+| originals, `shared_mutex_map` | 37.6 | 280 | 311 | 938 |
+| originals, `rcu_atomic_array` | 0.306 | 0.320 | 0.332 | 0.411 |
+
+36.8 ns for one uncontended `shared_lock` plus a hash find, against 10.3 ns for
+the same operation on x86_64. Two of them account for essentially all of the
+71.9 ns hooked call. An atomic read-modify-write with acquire/release semantics
+is simply dearer on a weakly-ordered machine, and the default configuration
+paid it twice per call.
+
+Correctness on the device, both configurations, run as a single process the way
+Android runs it: **187 passed, 4 failed, identical** -- the same four
+`PrologueFacts` cases as the Jetson, which is now two independent ARM64 targets
+agreeing that those four are an ARM64 property and not a registry one.
+
+### A measurement note worth keeping
+
+The Jetson figures above come from a standalone harness because Google
+Benchmark is not installed there. That harness runs a fixed iteration count
+immediately, which is fine on the Jetson -- its clock is pinned at 1.5104 GHz
+in the 15 W profile, `scaling_cur_freq == cpuinfo_max_freq` -- and **wrong on a
+phone**. Run on the Android device it reported the *unhooked* call at 3.67 ns
+with one thread and 1.36 ns with four: the same code apparently getting 2.7x
+faster as load increased, which is the governor ramping, not the code. Google
+Benchmark on the same device held `BM_RawCall` at 2.73 ns across every round.
+**The in-run unhooked control is what exposed it**, which is the whole reason
+it is measured in the same binary.
+
 ---
 
 ## FR-010 progress overall
