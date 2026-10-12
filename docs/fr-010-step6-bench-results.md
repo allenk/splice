@@ -176,15 +176,48 @@ follow-up ticket**, outside the current Step 6 scope.
 
 ---
 
-## Platform 2: Android ARM64
+## Platform 2: ARM64 — measured 2026-10-13
 
-_To be measured. The USB connection is currently unstable, and the VS Code
-extension `BvSshServer` holds port 5037; adb has to be restarted before the
-bench can be pushed._
+Measured on **ARM64 Linux**, not Android: an NVIDIA Jetson Orin Nano 8GB
+(6-core Cortex-A78AE, 15 W power mode, Ubuntu 24.04, gcc 13.3, 54 °C at the end
+of the run), built natively on the board. Google Benchmark is not installed
+there, so this is a standalone harness of the same shape as
+`bench_hook_contended`: N threads calling one hooked function in a tight loop,
+4,000,000 calls per thread per round, with the **unhooked call measured in the
+same binary** as an in-run control. Two binaries differing only in
+`SPLICE_REGISTRY_IMPL`, both built before anything was measured, run
+alternately for ten rounds each, medians:
 
-Expected: on ARM64 `std::function` costs slightly more than on x86_64 (per the
-Step 5 microbench); the RCU registry's relative gain should be comparable to
-x86_64 (registry contention is the same in nature).
+| threads | unhooked | `shared_mutex_map` | `rcu_atomic_array` | ratio |
+|---|---|---|---|---|
+| 1 | 3.32 ns | 100.8 ns | **11.95 ns** | 8.4x |
+| 2 | 3.33 | 1055.5 | **11.97** | 88x |
+| 4 | 3.32 | 1950.8 | **11.96** | 163x |
+| 6 | 3.32 | 2994.7 | **11.97** | **250x** |
+
+**The lock-free registry is flat: 6t/1t = 1.00x.** Its reader is an
+acquire-load on a line nobody writes, so it stays Shared on every core and
+generates no coherence traffic at all. The locked map pays an atomic
+read-modify-write on one mutex word per lookup, twice per call, and on a
+weakly-ordered machine that costs far more than the x86_64 equivalent --
+**100 ns even at one thread, with nothing to contend with.**
+
+So the prediction this section used to carry was wrong, and in an instructive
+direction: it expected the gain to be "comparable to x86_64" because "registry
+contention is the same in nature". Contention is exactly what is *not* the same
+in nature here. On the 9950X3D the same comparison is 23.3 ns against 4.3 at
+one thread and about 70x at eight; on this board it is 100.8 against 11.95 and
+250x at six.
+
+Both FR-010 gates are met on ARM64 with margin: 11.95 ns against the < 20 ns
+single-thread gate, and 1.00x against the < 5x scaling gate.
+
+Correctness alongside the numbers, same board, both configurations: the suite
+builds clean with no warnings from the registry or context headers, and runs
+**221 of 225** under ctest and **187 passed, 4 failed** in a single process --
+*identical in both configurations*, the four being pre-existing `PrologueFacts`
+failures on ARM64 that have nothing to do with the registry. The install took
+the real ARM64 atomic path (`atomic_install: done`), not a fallback.
 
 ---
 
