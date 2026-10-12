@@ -390,8 +390,8 @@ class GroupSite {
 public:
     using Binder = detail::SiteBinder<FuncType, typename Owner::policy_type>;
 
-    GroupSite(Owner& owner, void** slot, void* target, int slot_index)
-        : m_owner(owner), m_slot(slot), m_target(target), m_slot_index(slot_index) {}
+    GroupSite(Owner& group, void** slot, void* target, int slot_index)
+        : m_owner(group), m_slot(slot), m_target(target), m_slot_index(slot_index) {}
 
     GroupSite& when(std::function<bool()> pred) {
         m_gates.when_pred = std::move(pred);
@@ -639,11 +639,11 @@ public:
             sites[i].expected = pending.expected_prologue;
         }
 
-        std::vector<void*> originals(m_sites.size(), nullptr);
+        std::vector<void*> displaced(m_sites.size(), nullptr);
         splice_live_outcome engine_outcome{};
         void* handle = splice_live_prepare(sites.data(),
                                            static_cast<unsigned int>(sites.size()),
-                                           originals.data(), &engine_outcome);
+                                           displaced.data(), &engine_outcome);
         if (handle == nullptr) {
             record_engine_failure(engine_outcome);
             return refusal();
@@ -653,7 +653,7 @@ public:
         // registry's lock, and a lock taken while another thread is suspended
         // is how a process stops.
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
-            m_sites[i].publish(originals[i], group_bit);
+            m_sites[i].publish(displaced[i], group_bit);
         }
 
         std::vector<splice_patch_record> records(m_sites.size());
