@@ -203,9 +203,11 @@ resumes**.
 
 The limit, stated rather than implied: **`splice::live` means splice coordinated
 the threads it could enumerate.** A thread created after the enumeration is not
-in the set. This is not a stop-the-world -- that needs ptrace or root and is a
-documented non-goal -- and the tier is named `live` rather than `safe` for
-exactly that reason. It is still strictly better than the alternative, which is
+in the set. This is not a stop-the-world: that is a documented non-goal here,
+and reaching it would need either a thread entry-exclusion protocol or
+privileges this library does not assume -- see the platform note later in this
+guide, which declines to make a platform-wide impossibility claim. The tier is
+named `live` rather than `safe` for exactly that reason. It is still strictly better than the alternative, which is
 requiring the caller to guarantee that nothing is executing the target.
 
 Use `splice::slot_swap` when a slot swap is enough: it is one atomic store and

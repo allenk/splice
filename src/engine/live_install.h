@@ -77,8 +77,10 @@ namespace splice::engine {
 // shipping consumer hooks six methods on one interface.
 inline constexpr std::size_t kMaxGroupSites = 64;
 
-// Every thread of the process, bounded. A process with more live threads than
-// this cannot be coordinated from one snapshot and is told so.
+// The enumerated set, bounded. A process whose snapshot names more live
+// threads than this cannot be coordinated from that snapshot and is told so.
+// The bound is on what the OS reported, not on what the process holds: those
+// are the same number only if nothing changed while it was being counted.
 inline constexpr std::size_t kMaxEnlistedThreads = 4096;
 
 // Spelled with the C ABI's own constants as the initialisers, so there is one
