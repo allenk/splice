@@ -12,6 +12,8 @@
 #pragma once
 
 #include <splice/context.h>
+
+#include <type_traits>
 #include <splice/policy.h>
 #include <splice/registry.h>
 
@@ -45,9 +47,32 @@ struct TrampolineGenerator<Ret (*)(Args...), UniqueId, Policy> {
     static Ret trampoline(Args... args) {
         static HookContext* const ctx = &default_context();
         static const int slot = ctx->slot_for(reinterpret_cast<void*>(&trampoline));
-        auto original = ctx->template get_original<function_type>(slot);
-        return ctx->template get_hook_as<Policy, Ret, Args...>(slot)
-            .invoke(original, args...);
+
+        // Checked, so that "the library's own paths use the checked forms" is
+        // true of the hottest one too. A refused lookup used to come back as a
+        // reference to an inert slot shared by every refused id, and dispatch
+        // went ahead through it with whatever `get_original` had returned --
+        // which for a refused slot is nullptr.
+        auto hook = ctx->template try_get_hook_as<Policy, Ret, Args...>(slot);
+        if (hook.value == nullptr) {
+            auto fallback = ctx->template try_get_original<function_type>(slot);
+            if (fallback.value != nullptr) {
+                // The site is patched and its hook is not resolvable: the
+                // honest behaviour is the unhooked one, not a crash.
+                return fallback.value(args...);
+            }
+            SPLICE_LOGE_ONCE("splice: dispatch refused for slot %d -- %s, and "
+                             "there is no original to fall back to. The call "
+                             "returns without running anything.",
+                             slot, refusal_text(hook.reason));
+            if constexpr (std::is_void_v<Ret>) {
+                return;
+            } else {
+                return Ret{};
+            }
+        }
+        auto original = ctx->template try_get_original<function_type>(slot).value;
+        return hook.value->invoke(original, args...);
     }
 
     static void* get_trampoline_ptr() { return reinterpret_cast<void*>(&trampoline); }

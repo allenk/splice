@@ -111,7 +111,10 @@ public:
     // `.once().when(p).onInvoke(fn)`. Gates set AFTER the action verb are
     // not retroactively applied — document this in the user guide.
     InterceptorEntry& onInvoke(std::function<Ret(FuncType, Args...)> fn) {
-        commit_with_gates(std::move(fn));
+        // An onInvoke callback is handed the original and may ignore it, so it
+        // does not require one. Every other verb here wraps the original and
+        // does.
+        commit_with_gates(std::move(fn), /*needs_original=*/false);
         return *this;
     }
 
@@ -125,7 +128,8 @@ public:
             [f = std::move(fn)](FuncType orig, Args... args) -> Ret {
                 f(args...);
                 return orig(args...);
-            });
+            },
+            /*needs_original=*/true);
         return *this;
     }
 
@@ -139,14 +143,16 @@ public:
                 [f = std::move(fn)](FuncType orig, Args... args) {
                     orig(args...);
                     f(args...);
-                });
+                },
+                /*needs_original=*/true);
         } else {
             commit_with_gates(
                 [f = std::move(fn)](FuncType orig, Args... args) -> Ret {
                     Ret ret = orig(args...);
                     f(ret, args...);
                     return ret;
-                });
+                },
+                /*needs_original=*/true);
         }
         return *this;
     }
@@ -480,7 +486,10 @@ private:
     // Wrap user-supplied invoke-shaped lambda with pending gates, push to
     // HookManager, and clear m_pending_gates.
     template <typename InvokeFn>
-    void commit_with_gates(InvokeFn fn) {
+    // `needs_original` is the callable's own property, not the gates': the
+    // caller knows whether what it is handing over calls the original, and
+    // gates add the requirement rather than removing it.
+    void commit_with_gates(InvokeFn fn, bool needs_original) {
         // Snapshot the gates by value (shared_ptr is cheap) and reset
         // m_pending_gates so the next action verb starts clean.
         detail::Gates gates = std::move(m_pending_gates);
@@ -496,13 +505,17 @@ private:
         if (gates.transparent()) {
             // Fast path — no gates, store the lambda as-is.
             HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
-                .set_invoke(std::move(fn));
+                .set_invoke(std::move(fn), needs_original);
             return;
         }
 
+        // A gate wrapper calls the original on every path it turns away -- a
+        // false predicate, an exhausted budget, a re-entered scope -- so the
+        // stored callable requires one whatever the callable inside it needs.
         HookManager::get_hook_as<Policy, Ret, Args...>(m_slot)
             .set_invoke(detail::GateWrap<Ret, FuncType, Args...>::apply(
-                std::move(gates), std::move(fn)));
+                            std::move(gates), std::move(fn)),
+                        /*needs_original=*/true);
     }
 
     std::string m_lib;

@@ -248,7 +248,8 @@ struct SiteBinder<Ret (*)(Args...), Policy> {
     // Publish the original and the callback for a stub's registry slot. Called
     // BEFORE anything is written, every time: a thread that observes the new
     // code must find a complete hook behind it.
-    static void publish(int registry_slot, void* original, Gates gates, Invoke fn) {
+    static void publish(int registry_slot, void* original, Gates gates, Invoke fn,
+                        bool needs_original) {
         // Checked: this is a publication, and a publication that silently
         // did not happen is how a trampoline ends up calling nullptr.
         default_context().template set_original<FuncType>(
@@ -256,10 +257,13 @@ struct SiteBinder<Ret (*)(Args...), Policy> {
         auto& hook =
             default_context().template get_hook_as<Policy, Ret, Args...>(registry_slot);
         if (gates.transparent()) {
-            hook.set_invoke(std::move(fn));
+            hook.set_invoke(std::move(fn), needs_original);
         } else {
+            // A gate wrapper calls the original on every path it turns away,
+            // so the stored callable needs one whatever is inside it.
             hook.set_invoke(GateWrap<Ret, FuncType, Args...>::apply(
-                std::move(gates), std::move(fn)));
+                                std::move(gates), std::move(fn)),
+                            /*needs_original=*/true);
         }
     }
 };
@@ -464,7 +468,10 @@ public:
 
     template <typename Fn>
     Owner& onInvoke(Fn fn) {
-        return commit(typename Binder::Invoke(std::move(fn)));
+        // Handed the original and free to ignore it, unlike every wrapper
+        // this layer builds.
+        return commit(typename Binder::Invoke(std::move(fn)),
+                      /*needs_original=*/false);
     }
     // The action verb for a caller that already has its own replacement.
     //
@@ -508,15 +515,20 @@ public:
     }
 
     template <typename Fn>
-    Owner& before(Fn fn) { return commit(Binder::from_before(std::move(fn))); }
+    Owner& before(Fn fn) {
+        return commit(Binder::from_before(std::move(fn)), /*needs_original=*/true);
+    }
     template <typename Fn>
-    Owner& after(Fn fn) { return commit(Binder::from_after(std::move(fn))); }
+    Owner& after(Fn fn) {
+        return commit(Binder::from_after(std::move(fn)), /*needs_original=*/true);
+    }
 
 private:
-    Owner& commit(typename Binder::Invoke fn) {
+    Owner& commit(typename Binder::Invoke fn, bool needs_original) {
         m_owner.template add_pending<FuncType>(
             m_slot_index, m_slot, m_target, std::move(m_gates),
-            std::move(fn), m_expected, m_expect_set, m_expected_prologue);
+            std::move(fn), needs_original, m_expected, m_expect_set,
+            m_expected_prologue);
         return m_owner;
     }
 
@@ -744,7 +756,8 @@ public:
     // nothing else should call it.
     template <typename FuncType, typename Fn>
     void add_pending(int slot_index, void** slot, void* target,
-                     detail::Gates gates, Fn fn, void* expected, bool expect_set,
+                     detail::Gates gates, Fn fn, bool needs_original,
+                     void* expected, bool expect_set,
                      const unsigned char* expected_prologue = nullptr) {
         using Binder = detail::SiteBinder<FuncType, Policy>;
         const Site site{m_sites.size(), slot_index};
@@ -809,8 +822,9 @@ public:
             detail::StubPool<FuncType, Policy>::release(stub);
         };
         pending.publish = [slot_id = pending.registry_slot, gates = std::move(gates),
-                           fn = std::move(fn)](void* original,
-                                               std::uint64_t group_bit) mutable {
+                           fn = std::move(fn),
+                           needs_original](void* original,
+                                           std::uint64_t group_bit) mutable {
             detail::Gates site_gates = gates;
             // A scope named on the site itself wins; otherwise the group's
             // applies. Nothing merges two scopes: a hook is inside one scope
@@ -819,7 +833,8 @@ public:
                 site_gates.reentry_bit = group_bit;
                 site_gates.reentry_requested = true;
             }
-            Binder::publish(slot_id, original, std::move(site_gates), fn);
+            Binder::publish(slot_id, original, std::move(site_gates), fn,
+                            needs_original);
         };
         m_sites.push_back(std::move(pending));
     }

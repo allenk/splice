@@ -195,6 +195,39 @@ private:
     std::uint32_t m_generation = 0;
 };
 
+// ─── What a hookable signature may return ──────────────────────────────────
+// Dispatch has a refusal path -- there are ways to reach a hook with nothing
+// safe to call -- and for a non-void return that path has to produce a value.
+// For some return types none exists: a reference cannot be fabricated at all, a
+// type with no default constructor has no value to give, and one whose default
+// constructor can throw turns a refusal into an exception in a library meant to
+// work with exceptions disabled.
+//
+// Those signatures are therefore refused where it is visible, in a build error
+// naming the signature, rather than left undefined where it is not. Owner
+// ruling, 2026-10-13. Before this they compiled and, on that path, called a
+// null pointer.
+//
+// `nothrow` and not merely default-constructible, because a throwing default
+// constructor is the third case above. What this does **not** promise is that
+// the host survives: a nothrow default constructor may still call
+// std::terminate, and noexcept does not exclude undefined behaviour inside
+// someone else's code. The promise stops where the library's control does --
+// it never calls a null pointer, and its own fallback expression cannot throw.
+template <typename Ret>
+constexpr bool hookable_return_v =
+    std::is_void_v<Ret>
+    || (!std::is_reference_v<Ret> && std::is_nothrow_default_constructible_v<Ret>);
+
+#define SPLICE_ASSERT_HOOKABLE_RETURN(Ret)                                     \
+    static_assert(::splice::hookable_return_v<Ret>,                            \
+                  "splice: a hooked function's return type must be void, or "  \
+                  "nothrow default-constructible and not a reference. Dispatch "\
+                  "has a refusal path -- a hook reached with no callback and no "\
+                  "original -- and for this return type there is no value it "  \
+                  "could safely produce there. The alternative was calling a "  \
+                  "null pointer, which is what this used to do.")
+
 // ─── Refusal — why a registry access did not happen ────────────────────────
 // Returned, never only logged. A caller that gets nothing back needs to know
 // which of these it was: raise the capacity, look at memory pressure, or fix an
@@ -222,6 +255,40 @@ enum class Refusal {
     }
     return "unknown";
 }
+
+namespace detail {
+
+// Dispatch reached a hook with nothing it can call. Logged on a hot-path
+// variant, because this runs where a hook runs, and returning a
+// value-initialised result for a non-void signature -- which
+// `hookable_return_v` is what makes safe to write.
+//
+// `had_callback` separates the two ways to get here, because they are
+// different mistakes: no callback and no original means a trampoline was
+// reached before its hook was installed, while a callback that needs an
+// original and has none means a `.before`, `.after` or gated hook was
+// published against a site whose original never arrived.
+template <typename Ret>
+Ret refuse_dispatch(bool had_callback) noexcept {
+    if (had_callback) {
+        SPLICE_LOGE_ONCE("splice: dispatch refused -- this hook's callback "
+                         "needs the original function and there is none. The "
+                         "call returns without running anything; it is not a "
+                         "null call.");
+    } else {
+        SPLICE_LOGE_ONCE("splice: dispatch refused -- this slot has no callback "
+                         "and no original, which means the trampoline was "
+                         "reached before anything was installed behind it. The "
+                         "call returns without running anything.");
+    }
+    if constexpr (std::is_void_v<Ret>) {
+        return;
+    } else {
+        return Ret{};
+    }
+}
+
+} // namespace detail
 
 // A value and why it is absent. `operator bool` tests the reason rather than
 // the value, because "nothing is stored at this id" is a successful lookup and
@@ -285,20 +352,49 @@ struct HookStorage;   // primary intentionally undefined
 // design** (see policy.h doc — Splice hooks live for program lifetime).
 template <typename Ret, typename... Args>
 struct HookStorage<policy::rcu_writeonce, Ret, Args...> {
+    SPLICE_ASSERT_HOOKABLE_RETURN(Ret);
+
     using FuncType = Ret (*)(Args...);
     using HookFn   = std::function<Ret(FuncType, Args...)>;
 
-    std::atomic<HookFn*> m_fn{nullptr};
+    // The callable and whether dispatch must have an original to run it, in
+    // one record published together. They are read on every call and a flag
+    // read against a different callable than the one being called is the same
+    // defect as a presence test read against one -- so there is one load, and
+    // everything below it comes from that record.
+    struct Entry {
+        HookFn fn;
+        bool   needs_original = false;
+    };
 
-    void store(HookFn fn) noexcept(false) {
+    std::atomic<Entry*> m_entry{nullptr};
+
+    void store(HookFn fn, bool needs_original) noexcept(false) {
         // Intentional leak — see policy.h. New allocation on every set,
         // bounded by the (small) number of times user code calls onInvoke.
-        m_fn.store(new HookFn(std::move(fn)), std::memory_order_release);
+        m_entry.store(new Entry{std::move(fn), needs_original},
+                      std::memory_order_release);
     }
 
     Ret invoke(FuncType original, Args... args) {
-        if (auto* fn = m_fn.load(std::memory_order_acquire)) {
-            return (*fn)(original, args...);
+        const Entry* entry = m_entry.load(std::memory_order_acquire);
+
+        // Presence is the *callable* being non-empty, not the pointer being
+        // non-null: a published record can hold an empty std::function, and
+        // calling one throws -- inside a hook, in someone else's process, in a
+        // library documented as usable with exceptions disabled. The pointer
+        // test this replaced could not tell the two apart.
+        const bool have_callback = entry != nullptr && static_cast<bool>(entry->fn);
+
+        // With no callback the original *is* the call, so it is required. With
+        // one, the callable says whether it needs it.
+        const bool needs_original = have_callback ? entry->needs_original : true;
+
+        if (original == nullptr && needs_original) {
+            return detail::refuse_dispatch<Ret>(have_callback);
+        }
+        if (have_callback) {
+            return entry->fn(original, args...);
         }
         return original(args...);
     }
@@ -308,20 +404,32 @@ struct HookStorage<policy::rcu_writeonce, Ret, Args...> {
 // pays an atomic counter inc/dec; writer takes unique_lock.
 template <typename Ret, typename... Args>
 struct HookStorage<policy::shared_mutex, Ret, Args...> {
+    SPLICE_ASSERT_HOOKABLE_RETURN(Ret);
+
     using FuncType = Ret (*)(Args...);
     using HookFn   = std::function<Ret(FuncType, Args...)>;
 
     HookFn                    m_fn;
+    bool                      m_needs_original = false;
     mutable std::shared_mutex m_mutex;
 
-    void store(HookFn fn) {
+    void store(HookFn fn, bool needs_original) {
         std::unique_lock lock(m_mutex);
         m_fn = std::move(fn);
+        m_needs_original = needs_original;
     }
 
     Ret invoke(FuncType original, Args... args) {
+        // One lock over the presence test, the requirement and the call, for
+        // the same reason the other policy publishes one record: two
+        // observations are two different states.
         std::shared_lock lock(m_mutex);
-        if (m_fn) return m_fn(original, args...);
+        const bool have_callback = static_cast<bool>(m_fn);
+        const bool needs_original = have_callback ? m_needs_original : true;
+        if (original == nullptr && needs_original) {
+            return detail::refuse_dispatch<Ret>(have_callback);
+        }
+        if (have_callback) return m_fn(original, args...);
         return original(args...);
     }
 };
@@ -345,7 +453,14 @@ public:
     using FuncType = Ret (*)(Args...);
     using HookFn   = std::function<Ret(FuncType, Args...)>;
 
-    void set_invoke(HookFn fn) { m_storage.store(std::move(fn)); }
+    // `needs_original` defaults to false because an `onInvoke` callback is
+    // handed the original and may legitimately ignore it -- which the suite's
+    // own tests do. Every callable this library *wraps* around the original
+    // passes true, below and in the fluent layer, because those call it
+    // unconditionally.
+    void set_invoke(HookFn fn, bool needs_original = false) {
+        m_storage.store(std::move(fn), needs_original);
+    }
 
     // FR-009 / Step 9.1 — `before` and `after` are sugar over set_invoke,
     // wrapping the user lambda into a HookFn that brackets the original
@@ -360,7 +475,7 @@ public:
             f(args...);
             return orig(args...);
         };
-        set_invoke(std::move(wrapper));
+        set_invoke(std::move(wrapper), /*needs_original=*/true);
     }
 
     template <typename After>
@@ -370,14 +485,14 @@ public:
                 orig(args...);
                 f(args...);
             };
-            set_invoke(std::move(wrapper));
+            set_invoke(std::move(wrapper), /*needs_original=*/true);
         } else {
             auto wrapper = [f = std::move(fn)](FuncType orig, Args... args) -> Ret {
                 Ret ret = orig(args...);
                 f(ret, args...);
                 return ret;
             };
-            set_invoke(std::move(wrapper));
+            set_invoke(std::move(wrapper), /*needs_original=*/true);
         }
     }
 
