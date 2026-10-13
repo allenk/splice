@@ -419,7 +419,7 @@ The entire HookContext lookup table is also pluggable:
 
 | Impl | Reader cost | 8t/1t scaling | Writer |
 |---|---|---|---|
-| `splice::registry::rcu_atomic_array` (**default** since 2026-10-13) | pure atomic load + array index | **~4.5×** | copy snapshot + atomic publish + 100 ms deferred reclaim |
+| `splice::registry::rcu_atomic_array` (**default** since 2026-10-13) | pure atomic load + array index | **~4.5×** | one release store into a slot; nothing is reclaimed |
 | `splice::registry::shared_mutex_map` | shared_lock + map find | ~60× | unique_lock |
 
 Measured 2026-10-13 on a Ryzen 9 9950X3D, Windows, VS2022 Release, one commit
@@ -481,7 +481,9 @@ disagrees** rather than reading the shared context at the wrong offsets.
 |---|---|
 | **`disable()` ≠ uninstall** | Tier 2 inline disable restores the prologue but trampoline JIT memory leaks (forever, bounded by hook count) |
 | **rcu_writeonce is write-once-leak** | Every `set_invoke` allocates a fresh `std::function`; old ones are not reclaimed. Splice assumes callbacks are set once and stay |
-| **RCU registry is capped at SPLICE_MAX_HOOKS** | Default 512; hard limit. Rebuild to raise |
+| **The lock-free registry is capped** | Default 512 hook sites; a site beyond it is **refused**, not aborted. Rebuild the library to raise it — the value is private to its build, and `splice::detail::configured_capacity()` reports it at runtime |
+| **A dispatch identity is spent once** | A runtime chain claims a stub per signature and never gives it back, because a disable is a switch and not a drain. `SPLICE_SLOT_STUBS_PER_SIGNATURE` (8) is a per-process budget, not a concurrency limit |
+| **A group's own re-entrancy scope is spent once** | `.non_reentrant()` with no argument takes one of 64 scopes and the published hook keeps it. Pass your own `Reentrancy` to spend none |
 | **Recursive hook callbacks recurse** | Calling the same hooked function inside its callback re-enters the hook; `.non_reentrant()` sends the nested call to the original |
 | **`__COUNTER__` ID system** | Fixed to `__LINE__ << 16 \| __COUNTER__`; in theory two TUs on the same line with the same counter would still collide (probability << 10⁻⁶) |
 | **No guarantee on callback ordering** | Multiple hooks on the same target (which you should not do) have undefined behaviour |
@@ -626,9 +628,9 @@ splice::InstallerToken t = splice::register_global_installer(fn);
 |---|---|---|
 | `SPLICE_DEFAULT_POLICY` | `::splice::policy::rcu_writeonce` | Default callback storage policy |
 | `SPLICE_REGISTRY_IMPL` | `::splice::registry::rcu_atomic_array` | Registry implementation. A real CMake option, applied PUBLIC and carried to consumers |
-| `SPLICE_MAX_HOOKS` | 512 | `rcu_atomic_array` capacity. Hook sites beyond it are **refused**, with the reason logged |
+| `SPLICE_MAX_HOOKS` | 512 | Lock-free registry capacity. Sites beyond it are **refused**, with the reason logged. **Private to the library's build** since 2026-10-13: no header-visible layout depends on it, so a consumer compiled with a different value misreads nothing, and does not need to be told |
 | `SPLICE_SLOT_STUBS_PER_SIGNATURE` | 8 | Live `splice::Vtable` sites per signature |
-| `SPLICE_RCU_GRACE_PERIOD_MS` | 100 | RCU snapshot reclamation grace period |
+| ~~`SPLICE_RCU_GRACE_PERIOD_MS`~~ | — | **Removed 2026-10-13.** There is no snapshot to reclaim, so there is no grace period. Elapsed time was never a proof that no thread was still reading |
 | `SPLICE_LOG_TAG` | `"splice"` | Log tag string |
 | `SPLICE_BUILD_TESTS` | ON | Build unit tests |
 | `SPLICE_BUILD_EXAMPLES` | ON | Build examples |

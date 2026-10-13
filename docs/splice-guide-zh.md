@@ -343,7 +343,7 @@ SPLICE_HOOK_AS(splice::policy::shared_mutex, my_func)
 
 | Impl | Reader 成本 | 8t/1t scaling | 寫操作 |
 |---|---|---|---|
-| `splice::registry::rcu_atomic_array`（**預設**，2026-10-13 起）| pure atomic load + array index | **~4.5×** | copy snapshot + atomic publish + 100ms 延遲回收 |
+| `splice::registry::rcu_atomic_array`（**預設**，2026-10-13 起）| pure atomic load + array index | **~4.5×** | 一次 release store 寫進 slot；不回收任何東西 |
 | `splice::registry::shared_mutex_map` | shared_lock + map find | ~60× | unique_lock |
 
 2026-10-13 實測（Ryzen 9 9950X3D，Release，同一個 commit、只差這個選擇、
@@ -379,7 +379,9 @@ cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::rcu_atomic_array
 |---|---|
 | **`disable()` ≠ uninstall** | Tier 2 inline disable 還原 prologue 但 trampoline JIT 記憶體 leak（一輩子，bounded by hook 數量） |
 | **rcu_writeonce 是 write-once-leak** | 每次 `set_invoke` allocate 一個 `std::function`，舊的不回收。Splice 預期 callback set 一次就不變 |
-| **RCU registry 限 SPLICE_MAX_HOOKS** | 預設 512，硬上限。超過要 rebuild |
+| **無鎖 registry 有容量上限** | 預設 512 個 hook site；超過的會被**拒絕安裝**，不是 abort。要調高得重建 library —— 這個值只屬於 library 自己的建置，執行期用 `splice::detail::configured_capacity()` 查 |
+| **dispatch identity 只花一次** | runtime chain 每個 signature claim 一個 stub 且永不歸還，因為 disable 是開關而不是排空。`SPLICE_SLOT_STUBS_PER_SIGNATURE`（8）是**整個 process 的預算**，不是同時存活上限 |
+| **group 自己的 re-entrancy scope 也只花一次** | 無參數的 `.non_reentrant()` 會用掉 64 個 scope 之一，而已發佈的 hook 會一直持有它。傳入自己的 `Reentrancy` 就一個都不花 |
 | **hook callback 內遞迴呼叫同一 hook 會重入** | 巢狀呼叫會再進入 hook；`.non_reentrant()` 讓巢狀呼叫直接走原函式 |
 | **`__COUNTER__` ID 系統** | 已修為 `__LINE__ << 16 \| __COUNTER__`，理論上兩個 TU 同行 + 同 counter 仍會撞（機率極低）|
 | **不保證 callback 順序** | 同 target 多次 hook（不該這樣做）行為未定義 |
@@ -486,8 +488,8 @@ splice::InstallerToken t = splice::register_global_installer(fn);
 |---|---|---|
 | `SPLICE_DEFAULT_POLICY` | `::splice::policy::rcu_writeonce` | callback storage 預設 policy |
 | `SPLICE_REGISTRY_IMPL` | `::splice::registry::rcu_atomic_array` | registry 實作。真正的 CMake option，以 PUBLIC 方式傳遞給 consumer |
-| `SPLICE_MAX_HOOKS` | 512 | rcu_atomic_array 容量。超過的 hook site 會被**拒絕安裝**並記錄原因 |
-| `SPLICE_RCU_GRACE_PERIOD_MS` | 100 | RCU snapshot 回收 grace period |
+| `SPLICE_MAX_HOOKS` | 512 | 無鎖 registry 的容量。超過的 hook site 會被**拒絕安裝**並記錄原因。2026-10-13 起**只屬於 library 自己的建置**：沒有任何 header 看得到的 layout 依賴它，所以組態不同的 consumer 不會讀錯任何東西，也不需要被告知 |
+| ~~`SPLICE_RCU_GRACE_PERIOD_MS`~~ | — | **2026-10-13 移除。** 已經沒有 snapshot 要回收，所以沒有 grace period。經過的時間從來就不是「沒有執行緒還在讀」的證明 |
 | `SPLICE_LOG_TAG` | `"splice"` | log tag 字串 |
 | `SPLICE_BUILD_TESTS` | ON | 編 unit tests |
 | `SPLICE_BUILD_EXAMPLES` | ON | 編 examples |

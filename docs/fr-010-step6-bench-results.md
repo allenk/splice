@@ -209,8 +209,15 @@ in nature here. On the 9950X3D the same comparison is 23.3 ns against 4.3 at
 one thread and about 70x at eight; on this board it is 100.8 against 11.95 and
 250x at six.
 
-Both FR-010 gates are met on ARM64 with margin: 11.95 ns against the < 20 ns
-single-thread gate, and 1.00x against the < 5x scaling gate.
+The single-thread gate is met on ARM64 with margin: 11.95 ns against < 20 ns.
+
+**The scaling gate is defined at eight threads and this board has six cores**,
+so 1.00x here is 6t/1t and is *not* the gate. It is strong evidence about the
+same property -- a reader that generates no coherence traffic does not care how
+many cores are reading -- and it is not the measurement the gate asks for. The
+eight-thread run was not made on this board. Corrected after an external review
+pointed out that a six-thread ratio had been presented as satisfying an
+eight-thread gate.
 
 Correctness alongside the numbers, same board, both configurations: the suite
 builds clean with no warnings from the registry or context headers, and runs
@@ -255,10 +262,28 @@ needs no rebuild:
 | originals, `rcu_atomic_array` | 0.306 | 0.320 | 0.332 | 0.411 |
 
 36.8 ns for one uncontended `shared_lock` plus a hash find, against 10.3 ns for
-the same operation on x86_64. Two of them account for essentially all of the
-71.9 ns hooked call. An atomic read-modify-write with acquire/release semantics
-is simply dearer on a weakly-ordered machine, and the default configuration
-paid it twice per call.
+the same operation on x86_64.
+
+**Two corrections to what this paragraph used to say, both from an external
+review, because both claimed more than the numbers support.**
+
+It said two of those lookups "account for essentially all of the 71.9 ns hooked
+call". That is two micro-benchmarks added together and presented as a
+measurement of the whole, which this project has already been wrong about once:
+the same arithmetic predicted about 7.5 ns for the lock-free path when the
+measured answer was 4.3. Adding isolated lookups is a **derivation**, not a
+measurement, and back-to-back lock acquisitions contend differently from
+acquisitions separated by a function call. What is measured here is the A/B: the
+locked configuration costs 71.9 ns per call and the lock-free one 4.6 ns, on
+this device, in this build.
+
+It also said an acquire/release read-modify-write "is simply dearer on a
+weakly-ordered machine". The difference is real and survives normalising for
+clock -- about 34 cycles against 121 -- but nothing in this comparison isolates
+its cause. The two sides differ in core, in compiler, and in standard library,
+and the standard library implements `shared_mutex` differently on each. Which
+of those the 3.5x belongs to is **not isolated**, and naming a mechanism would
+be replacing one unverified cause with another.
 
 Correctness on the device, both configurations, run as a single process the way
 Android runs it: **187 passed, 4 failed, identical** -- the same four

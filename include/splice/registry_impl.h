@@ -9,12 +9,21 @@
 //       shared_mutex counter — cache-line bouncing under contention is
 //       the bottleneck FR-010 Step 6 attacks.
 //
-//   registry::rcu_atomic_array            — atomic<Snapshot*> publish-
-//       and-forget. Reader does a single std::memory_order_acquire load;
-//       no atomic RMW on the hot path. Writer copies the snapshot,
-//       publishes the new pointer, and defers reclamation via EBR.
-//       Trade-offs: higher writer latency, ~2× transient memory during
-//       grace period, snapshot capped at SPLICE_MAX_HOOKS.
+//   registry::rcu_atomic_array            — an array of atomic slot
+//       pointers, one per id. Reader does a single
+//       std::memory_order_acquire load; no atomic RMW on the hot path.
+//       Writer does one release store into a slot.
+//       Trade-offs: the capacity is a hard bound, and a hook object lives
+//       for the life of the process.
+//
+//       It published an immutable snapshot and reclaimed retired ones
+//       after a 100 ms grace period until 2026-10-13. That cannot be
+//       sound: a reader loads the snapshot pointer and *then* dereferences
+//       the array, and a thread preempted between those two steps outlives
+//       any period. Reclaiming correctly needs reader registration or
+//       hazard pointers, which costs the hot path the whole reason this
+//       implementation exists -- so nothing is reclaimed. Elapsed time was
+//       never a proof that no thread was still reading.
 //
 // The choice is build-time. Switching at runtime is deliberately not
 // supported — see docs/fr-010-step6-rcu-registry-design.md §"Why build-
@@ -71,12 +80,21 @@ struct rcu_atomic_array {};
 #   define SPLICE_REGISTRY_IMPL ::splice::registry::rcu_atomic_array
 #endif
 
-// Snapshot bound for the rcu_atomic_array impl. Decided 2026-05-19:
-//   - 512 × 16 bytes (shared_ptr on x64) = 8 KiB snapshot
-//   - Fits comfortably in L1d (32-48 KiB) → reader lookup stays at ~1 ns
+// Capacity for the rcu_atomic_array impl. Decided 2026-05-19:
+//   - 512 slots, 8 bytes each, stays comfortably in L1d (32-48 KiB)
 //   - Covers AOSP system-service hooking (typical 300-800 hooks)
-//   - Bump to 4096 for full-syscall tracing, but accept L2 reader penalty
+//   - Bump to 4096 for full-syscall tracing, but accept the L2 reader penalty
 // See docs/fr-010-step6-rcu-registry-design.md §"Why selecting 512".
+//
+// This fallback is for a build that compiles the library without CMake. The
+// CMake option is PRIVATE to the library's own target on purpose: since
+// 2026-10-13 the slot arrays live behind a pointer and a runtime count, so no
+// header-visible layout, inline expression or template argument depends on
+// this value -- which means a translation unit compiled with a different one
+// has nothing it can misread, and does not need to be told. Three ways of
+// *detecting* such a disagreement were designed and refuted before that;
+// removing the dependency needs none of them to work. Ask
+// splice::detail::configured_capacity() for the value at runtime.
 #ifndef SPLICE_MAX_HOOKS
 #   define SPLICE_MAX_HOOKS 512
 #endif

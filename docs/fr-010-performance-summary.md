@@ -127,11 +127,29 @@ Zero behaviour change, zero performance change. Preparation for Step 6.2.
 ### Step 6.2 — the RCU implementation (2026-05-25)
 
 Two new specialisations:
-- `HookRegistry<rcu_atomic_array>` — publishes through `std::atomic<Snapshot*>`, indexes a `std::array<shared_ptr, SPLICE_MAX_HOOKS>`. Reader = one acquire load
-- `OriginalsRegistry<rcu_atomic_array>` — `std::array<std::atomic<void*>, SPLICE_MAX_HOOKS>`. Reader = one atomic load
+- `HookRegistry<rcu_atomic_array>` — one acquire load from an array of
+  `std::atomic<HookBase*>`, allocated once inside the library and indexed by id
+- `OriginalsRegistry<rcu_atomic_array>` — the same shape for the originals.
+  Reader = one atomic load
+
+**Changed 2026-10-13.** The hook registry used to publish an immutable snapshot
+through `std::atomic<Snapshot*>` and reclaim retired snapshots after a grace
+period. An external review showed the grace period cannot be sound -- a reader
+loads the snapshot pointer and *then* dereferences the array, and a thread
+preempted between those two steps outlives any period -- so there is no
+snapshot and nothing is reclaimed. The reader is the same single acquire load;
+what is gone is the indirection through the snapshot, which is why the
+single-thread figure moved slightly in the right direction rather than not at
+all.
 
 `SPLICE_MAX_HOOKS = 512` (decided 2026-05-19): covers the typical hook count of
-AOSP system services and keeps the 8 KiB snapshot within L1d.
+AOSP system services, and the slot array stays L1d-friendly.
+
+Since 2026-10-13 this value is **private to the library's own build**. The slot
+arrays live behind a pointer and a runtime count, so no header-visible layout
+depends on the capacity and a consumer compiled with a different value has
+nothing it can misread. Anything that needs the number at runtime asks
+`splice::detail::configured_capacity()`.
 
 ### Step 6.3 — measurement (2026-05-26)
 

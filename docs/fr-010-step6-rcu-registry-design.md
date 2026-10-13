@@ -1,5 +1,28 @@
 # FR-010 Step 6 — RCU registry design and escape-hatch evaluation
 
+
+> **Superseded in part, 2026-10-13.** The reclamation strategy this document
+> designs -- publish an immutable snapshot, retire the old one with a
+> timestamp, free it once a grace period has elapsed -- was removed. An
+> external review showed it cannot be sound: a reader loads the snapshot
+> pointer and *then* dereferences the array, and a thread preempted between
+> those two steps -- or stopped in a debugger, or descheduled on a loaded
+> phone -- outlives any period. `size()` was worse, traversing every slot of an
+> unpinned snapshot. The hook objects surviving in the next snapshot's
+> `shared_ptr` copies did not help, because what the reader dereferences first
+> is the array, and nothing kept that alive. **Elapsed time is not quiescence.**
+>
+> Reclaiming correctly needs reader registration or hazard pointers, which
+> costs the hot path the entire reason this implementation exists. So nothing
+> is reclaimed: one flat array of `std::atomic<HookBase*>` for the life of the
+> context, and hook objects that live for the life of the process -- the same
+> bargain the trampolines already make here. The reader is unchanged, a single
+> acquire load, and the measurements below still hold for it.
+>
+> What remains correct in this document: the reader's cost analysis, the
+> coherence argument, and the cross-translation-unit id fix. What is
+> superseded: everything about retirement, the grace period and
+> `SPLICE_RCU_GRACE_PERIOD_MS`, which no longer exists.
 **Status:** Design proposal / awaiting Allen's decision to implement
 **FR:** FR-010 Step 6 (a true RCU registry — close the 8t/1t < 5× gate)
 **Written:** 2026-05-19
@@ -103,7 +126,7 @@ RCU's cost is not zero; it moves the cost from readers to writers and memory:
 | Axis | `shared_mutex` (now) | RCU registry |
 |---|---|---|
 | Reader latency | Moderate (`shared_lock` RMW) | **Very low (pure load)** |
-| Writer latency | Moderate (`unique_lock`) | **High (copy snapshot + atomic publish + wait for a grace period)** |
+| Writer latency | Moderate (`unique_lock`) | Low (one release store into a slot) |
 | Peak memory | 1× registry size | **2×, briefly** (an old snapshot is reclaimed only after a grace period) |
 | Write visibility | Immediate (visible when the lock is released) | **Delayed** (a reader may see the old snapshot for hundreds of ns) |
 | Failure mode | Deadlock (known safeguards) | **Memory-reclamation bugs, very hard to debug** (use-after-free) |
