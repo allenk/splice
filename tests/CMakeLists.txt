@@ -160,6 +160,27 @@ if(SPLICE_HAS_X86_64_BACKEND AND NOT CMAKE_CROSSCOMPILING)
     target_link_libraries(splice_install_all_test PRIVATE
         splice::splice splice_warnings splice_sanitizers GTest::gtest_main)
     gtest_discover_tests(splice_install_all_test DISCOVERY_TIMEOUT 30)
+    # Two translation units that disagree about SPLICE_MAX_HOOKS, linked into
+    # one program. The assertion is that it links and works: since the capacity
+    # left the ABI there is nothing for a mismatch to misread, and this is what
+    # asserts that rather than trusting it. One source file is compiled with a
+    # different capacity on purpose -- see tests/mixed_config/.
+    add_executable(splice_mixed_config_test
+        mixed_config/test_mixed_configuration.cpp
+        mixed_config/tu_small_capacity.cpp
+        mixed_config/tu_default_capacity.cpp
+    )
+    target_include_directories(splice_mixed_config_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/mixed_config)
+    # Only this one file disagrees. If the capacity is ever part of the layout
+    # again, this is the line that makes the program inconsistent, and the test
+    # beside it is what notices.
+    set_source_files_properties(mixed_config/tu_small_capacity.cpp PROPERTIES
+        COMPILE_DEFINITIONS SPLICE_MAX_HOOKS=64)
+    target_link_libraries(splice_mixed_config_test PRIVATE
+        splice::splice splice_warnings splice_sanitizers GTest::gtest_main)
+    gtest_discover_tests(splice_mixed_config_test DISCOVERY_TIMEOUT 30)
+
     # Real patcher with a deterministic OS fault seam; no production fault flags.
     add_executable(splice_patcher_failure_test
         test_patcher_failure.cpp

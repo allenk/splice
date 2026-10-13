@@ -9,6 +9,7 @@
 #include <splice/registry.h>  // for the backwards-compat shim tests
 
 #include <atomic>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -214,4 +215,69 @@ TEST(ShimCompat, install_all_runs_installers_queued_via_shim) {
 
     splice::install_all();
     EXPECT_GE(hits.load(), 1);
+}
+
+// ─── the capacity, exhausted ───────────────────────────────────────────────
+// The refusal path had been compiled and never taken by a test. That is the
+// gap that held publication: a refactor dropping one line could have restored
+// the original defect -- a process killed by std::abort() inside somebody
+// else's game -- with nothing to tell anyone.
+//
+// This runs at any capacity and is cheapest at the smallest supported one,
+// which is the opposite of how the old fixtures treated a small capacity.
+
+TEST(SlotCapacity, is_exhausted_exactly_at_the_bound_and_then_refuses) {
+    splice::HookContext ctx;
+    ASSERT_EQ(ctx.init_status(), splice::HookContext::InitStatus::ok);
+
+    const int capacity = ctx.slot_capacity();
+    if (capacity == (std::numeric_limits<int>::max)()) {
+        GTEST_SKIP() << "this configuration's registry is an unbounded map, so "
+                        "there is no capacity to exhaust";
+    }
+    ASSERT_GT(capacity, 0);
+
+    // Distinct addresses, because that is what a slot is keyed on. The bytes
+    // are never read; a trampoline's address is its identity and nothing more.
+    std::vector<unsigned char> identities(static_cast<std::size_t>(capacity) + 1);
+
+    for (int i = 0; i < capacity; ++i) {
+        const int slot = ctx.slot_for(&identities[static_cast<std::size_t>(i)]);
+        ASSERT_EQ(slot, i) << "slots are issued in order from zero, at " << i;
+    }
+
+    // One past the bound: refused, and refused by returning -1 rather than by
+    // ending the process.
+    const int refused =
+        ctx.slot_for(&identities[static_cast<std::size_t>(capacity)]);
+    EXPECT_EQ(refused, -1) << "the capacity did not refuse at its own bound";
+
+    // And a site already issued a slot still gets the same one: exhaustion
+    // refuses new sites, it does not break the ones that got in.
+    EXPECT_EQ(ctx.slot_for(&identities[0]), 0);
+}
+
+TEST(SlotCapacity, a_refused_slot_is_refused_again_and_nothing_is_corrupted) {
+    splice::HookContext ctx;
+    const int capacity = ctx.slot_capacity();
+    if (capacity == (std::numeric_limits<int>::max)()) {
+        GTEST_SKIP() << "unbounded registry; nothing to exhaust";
+    }
+
+    std::vector<unsigned char> identities(static_cast<std::size_t>(capacity) + 2);
+    for (int i = 0; i < capacity; ++i) {
+        (void)ctx.slot_for(&identities[static_cast<std::size_t>(i)]);
+    }
+
+    // Twice, with two different addresses: a refusal is a state the context
+    // stays in, not a one-off.
+    EXPECT_EQ(ctx.slot_for(&identities[static_cast<std::size_t>(capacity)]), -1);
+    EXPECT_EQ(ctx.slot_for(&identities[static_cast<std::size_t>(capacity) + 1]), -1);
+
+    // The registries are still usable for everything that did get a slot,
+    // which is what makes refusing the right answer instead of aborting.
+    ctx.set_original<int (*)(int)>(0, &sample_add1);
+    auto fn = ctx.get_original<int (*)(int)>(0);
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn(1), 2);
 }
