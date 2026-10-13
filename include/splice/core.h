@@ -312,7 +312,17 @@ private:
         // Use the runtime slot (keyed by trampoline_ptr) — avoids cross-TU
         // __COUNTER__ collisions that previously cross-aliased originals
         // between hooks installed from different translation units.
-        OriginalRegistry::set_original(ctx->self->m_slot, ctx->self->m_original);
+        if (const Refusal why = OriginalRegistry::try_set_original(
+                ctx->self->m_slot, ctx->self->m_original);
+            why != Refusal::ok) {
+            // The slot was validated before the patch went in, so this is a
+            // logic error rather than a condition -- said loudly for that
+            // reason.
+            SPLICE_LOGE("splice: publishing the original for slot %d was "
+                        "refused (%s) after the patch landed; the trampoline "
+                        "will see nullptr",
+                        ctx->self->m_slot, refusal_text(why));
+        }
     }
 
     // Why this entry cannot install, or nullptr when it can. Two reasons so
@@ -321,10 +331,21 @@ private:
     // second one from being a std::abort() inside the registry.
     [[nodiscard]] const char* refusal_reason() const noexcept {
         if (m_slot < 0) {
-            return "no registry slot was issued -- either the configured "
-                   "capacity is in use (SPLICE_MAX_HOOKS) or this build "
-                   "disagrees with libsplice about SPLICE_REGISTRY_IMPL; the "
-                   "log line from HookContext says which";
+            // Three conditions reach a refused slot and they are not the same
+            // fact. Reporting an unallocated registry as an exhausted capacity
+            // would send a reader to rebuild with a larger SPLICE_MAX_HOOKS
+            // over a memory problem, so the one the context knows for certain
+            // is named here rather than left to a log line.
+            if (default_context().init_status()
+                != HookContext::InitStatus::allocation_failed) {
+                return "no registry slot was issued -- either the configured "
+                       "capacity is in use (SPLICE_MAX_HOOKS) or this build "
+                       "disagrees with libsplice about SPLICE_REGISTRY_IMPL; the "
+                       "log line from HookContext says which";
+            }
+            return "the registry storage could not be allocated, so no hook in "
+                   "this process can be given a slot -- this is memory "
+                   "pressure, not a capacity that needs raising";
         }
         if (m_refused) return "no re-entrancy scope was available (64 in use)";
         return nullptr;
@@ -399,7 +420,13 @@ private:
         out.stub   = m_trampoline_ptr;
         out.publish = [this](void* original) {
             m_original = reinterpret_cast<FuncType>(original);
-            OriginalRegistry::set_original(m_slot, m_original);
+            if (const Refusal why =
+                    OriginalRegistry::try_set_original(m_slot, m_original);
+                why != Refusal::ok) {
+                SPLICE_LOGE("splice: publishing the original for slot %d was "
+                            "refused (%s); the trampoline will see nullptr",
+                            m_slot, refusal_text(why));
+            }
         };
         out.settle = [this](const splice_patch_record* record) {
             if (record == nullptr) {

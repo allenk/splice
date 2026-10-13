@@ -71,6 +71,21 @@ public:
     static Hook<Ret, Args...>& get_hook(int id) {
         return default_context().template get_hook<Ret, Args...>(id);
     }
+
+    // Checked forms. These exist here and not only on HookContext because
+    // this is where the documented call sites are: a checked accessor nobody
+    // reaches is a fix on paper. Both return the reason as a value -- see
+    // `splice::Refusal` -- and the two spellings above cannot.
+    template <typename Policy, typename Ret, typename... Args>
+    [[nodiscard]] static Checked<HookAs<Policy, Ret, Args...>*> try_get_hook_as(int id) {
+        return default_context().template try_get_hook_as<Policy, Ret, Args...>(id);
+    }
+
+    template <typename Ret, typename... Args>
+    [[nodiscard]] static Checked<Hook<Ret, Args...>*> try_get_hook(int id) {
+        return default_context()
+            .template try_get_hook_as<SPLICE_DEFAULT_POLICY, Ret, Args...>(id);
+    }
 };
 
 // ─── OriginalRegistry — routes to default_context() ───────────────────────
@@ -87,6 +102,19 @@ public:
     template <typename FuncType>
     static FuncType get_original_by_key(const std::string& key) {
         return default_context().template get_original_by_key<FuncType>(key);
+    }
+
+    // Checked forms, for the same reason as HookManager's. `try_get_original`
+    // distinguishes "nothing is stored at this id", which is a successful
+    // lookup, from a refusal -- which `get_original` returning nullptr cannot.
+    template <typename FuncType>
+    [[nodiscard]] static Refusal try_set_original(int id, FuncType original) {
+        return default_context().template try_set_original<FuncType>(id, original);
+    }
+
+    template <typename FuncType>
+    [[nodiscard]] static Checked<FuncType> try_get_original(int id) {
+        return default_context().template try_get_original<FuncType>(id);
     }
 };
 

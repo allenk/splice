@@ -249,6 +249,8 @@ struct SiteBinder<Ret (*)(Args...), Policy> {
     // BEFORE anything is written, every time: a thread that observes the new
     // code must find a complete hook behind it.
     static void publish(int registry_slot, void* original, Gates gates, Invoke fn) {
+        // Checked: this is a publication, and a publication that silently
+        // did not happen is how a trampoline ends up calling nullptr.
         default_context().template set_original<FuncType>(
             registry_slot, reinterpret_cast<FuncType>(original));
         auto& hook =
@@ -774,10 +776,21 @@ public:
 
         const int registry_slot = default_context().slot_for(stub);
         if (registry_slot < 0) {
-            SPLICE_LOGE("splice: site %zu cannot be given a registry slot (the "
-                        "configured capacity is in use); refusing rather than "
-                        "installing a hook the trampoline cannot resolve",
-                        site.ordinal);
+            if (default_context().init_status()
+                == HookContext::InitStatus::allocation_failed) {
+                SPLICE_LOGE("splice: site %zu cannot be given a registry slot "
+                            "-- the registry storage was never allocated, which "
+                            "is memory pressure and not a capacity to raise; "
+                            "refusing rather than installing a hook the "
+                            "trampoline cannot resolve",
+                            site.ordinal);
+            } else {
+                SPLICE_LOGE("splice: site %zu cannot be given a registry slot "
+                            "(the configured capacity is in use); refusing "
+                            "rather than installing a hook the trampoline "
+                            "cannot resolve",
+                            site.ordinal);
+            }
             detail::StubPool<FuncType, Policy>::release(stub);
             fail(Stage::prepare, Operation::none, 0, site);
             return;

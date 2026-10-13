@@ -195,6 +195,46 @@ private:
     std::uint32_t m_generation = 0;
 };
 
+// ─── Refusal — why a registry access did not happen ────────────────────────
+// Returned, never only logged. A caller that gets nothing back needs to know
+// which of these it was: raise the capacity, look at memory pressure, or fix an
+// id it computed itself are three different actions, and a log line is not an
+// answer to a question the code has to act on.
+enum class Refusal {
+    ok,
+    not_initialised,   // the registry storage could not be allocated
+    out_of_range,      // the id is outside the configured capacity
+    type_mismatch,     // the slot holds a hook of a different type
+};
+
+// `type_mismatch` is declared here and not produced yet: the slot has to carry
+// the type identity it was created with before anything can compare it, which
+// arrives with the checked dispatch path. Declaring it now keeps the one
+// vocabulary rather than widening an enum later and making every caller's
+// switch stale.
+
+[[nodiscard]] inline const char* refusal_text(Refusal why) noexcept {
+    switch (why) {
+        case Refusal::ok:              return "ok";
+        case Refusal::not_initialised: return "the registry storage was never allocated";
+        case Refusal::out_of_range:    return "the id is outside the configured capacity";
+        case Refusal::type_mismatch:   return "the slot holds a hook of a different type";
+    }
+    return "unknown";
+}
+
+// A value and why it is absent. `operator bool` tests the reason rather than
+// the value, because "nothing is stored at this id" is a successful lookup and
+// a null original is a legitimate answer to it -- a distinction the old
+// pointer-returning accessors could not express at all.
+template <typename T>
+struct Checked {
+    T       value{};
+    Refusal reason = Refusal::ok;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return reason == Refusal::ok; }
+};
+
 // ─── HookBase ───────────────────────────────────────────────────────────────
 // Empty virtual base — lets HookContext store `shared_ptr<HookBase>` as a
 // heterogeneous container while each concrete `Hook<Ret,Args...>` carries
@@ -772,14 +812,51 @@ public:
     // load on a fixed-size array indexed by id). Under shared_mutex_map,
     // behaves as the pre-Step-6 unordered_map + shared_mutex.
 
+    // Checked. The order of these two tests is the contract and not an
+    // accident: an unallocated registry is reported as such and never as an
+    // invalid id, because a caller acts differently on the two.
     template <typename FuncType>
-    void set_original(int id, FuncType original) {
+    [[nodiscard]] Refusal try_set_original(int id, FuncType original) {
+        if (m_init_status != InitStatus::ok) return Refusal::not_initialised;
+        if (id < 0 || id >= m_slot_capacity) return Refusal::out_of_range;
         m_originals_registry.set(id, reinterpret_cast<void*>(original));
+        return Refusal::ok;
     }
 
+    // A null value with `Refusal::ok` means the lookup worked and nothing is
+    // stored there. That is a different fact from a refusal, and the
+    // pointer-returning spelling below cannot tell them apart.
+    template <typename FuncType>
+    [[nodiscard]] Checked<FuncType> try_get_original(int id) const {
+        if (m_init_status != InitStatus::ok) return {FuncType{}, Refusal::not_initialised};
+        if (id < 0 || id >= m_slot_capacity) return {FuncType{}, Refusal::out_of_range};
+        return {reinterpret_cast<FuncType>(m_originals_registry.get(id)), Refusal::ok};
+    }
+
+    // Kept for source and ABI continuity, and **it cannot report a refusal** --
+    // there is nowhere in a `void` return for a reason to go. It logs one and
+    // discards the value, which means a caller that passes an id it computed
+    // itself can lose an original and only find out from a log. Prefer
+    // `try_set_original`; the library's own paths use it. This is an accepted
+    // limitation of a signature that is treated as stable, stated here rather
+    // than left for a reader to discover.
+    template <typename FuncType>
+    void set_original(int id, FuncType original) {
+        const Refusal why = try_set_original<FuncType>(id, original);
+        if (why != Refusal::ok) {
+            SPLICE_LOGE("splice: set_original(id=%d) refused -- %s. This "
+                        "signature cannot report that, so the original is not "
+                        "stored and the trampoline will see nullptr; use "
+                        "try_set_original to get the reason back.",
+                        id, refusal_text(why));
+        }
+    }
+
+    // As above: a null return means either "nothing stored" or "refused", and
+    // this spelling cannot say which. `try_get_original` can.
     template <typename FuncType>
     [[nodiscard]] FuncType get_original(int id) const {
-        return reinterpret_cast<FuncType>(m_originals_registry.get(id));
+        return try_get_original<FuncType>(id).value;
     }
 
     template <typename FuncType>
@@ -797,9 +874,29 @@ public:
     // Per-call-site lookup with explicit Policy. Same id must always be
     // queried with the same (Ret, Policy, Args...) tuple — macros
     // enforce this via __COUNTER__.
+    // Checked, and the form the library's own paths use. Same order of tests
+    // as the originals side, for the same reason.
+    template <typename Policy, typename Ret, typename... Args>
+    [[nodiscard]] Checked<HookAs<Policy, Ret, Args...>*> try_get_hook_as(int id) {
+        using HookT = HookAs<Policy, Ret, Args...>;
+        if (m_init_status != InitStatus::ok) return {nullptr, Refusal::not_initialised};
+        if (id < 0 || id >= m_slot_capacity) return {nullptr, Refusal::out_of_range};
+        return {&m_hook_registry.template get_or_create<HookT>(id), Refusal::ok};
+    }
+
+    // Kept for source and ABI continuity. A reference cannot carry a refusal,
+    // so on one it logs and hands back the registry's shared inert slot --
+    // which is why nothing should dispatch through this spelling. Accepted
+    // limitation, same as `set_original` above; `try_get_hook_as` reports.
     template <typename Policy, typename Ret, typename... Args>
     HookAs<Policy, Ret, Args...>& get_hook_as(int id) {
         using HookT = HookAs<Policy, Ret, Args...>;
+        auto checked = try_get_hook_as<Policy, Ret, Args...>(id);
+        if (checked.value != nullptr) return *checked.value;
+        SPLICE_LOGE("splice: get_hook_as(id=%d) refused -- %s. This signature "
+                    "cannot report that; use try_get_hook_as. What comes back "
+                    "is an inert slot shared by every refused id.",
+                    id, refusal_text(checked.reason));
         return m_hook_registry.template get_or_create<HookT>(id);
     }
 

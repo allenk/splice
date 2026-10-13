@@ -7,6 +7,7 @@
 #include <splice/registry.h>
 
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -197,4 +198,87 @@ TEST(GlobalInstallers, freed_slot_is_recycled) {
     EXPECT_EQ(slot_first, slot_second)
         << "free-list should hand the just-released slot back";
     EXPECT_EQ(splice::global_installer_count(), before + 1);
+}
+
+// ─── Checked accessors ─────────────────────────────────────────────────────
+// Added 2026-10-13. The pointer-returning spellings cannot distinguish a
+// refusal from an empty slot, and the `void` setter cannot report one at all,
+// so a caller passing an id it computed itself could silently lose an original
+// and only find out from a log. These assert the distinction the checked forms
+// exist to make.
+
+TEST(CheckedAccessors, an_empty_slot_is_a_successful_lookup_not_a_refusal) {
+    using Fn = int (*)(int);
+    const auto got = splice::OriginalRegistry::try_get_original<Fn>(kIdNothingStored);
+
+    // Nothing is stored here, which is an answer and not a failure.
+    EXPECT_TRUE(static_cast<bool>(got));
+    EXPECT_EQ(got.reason, splice::Refusal::ok);
+    EXPECT_EQ(got.value, nullptr);
+}
+
+TEST(CheckedAccessors, an_out_of_range_id_is_refused_and_says_why) {
+    using Fn = int (*)(int);
+
+    // -1 is outside every configuration, map or array.
+    const auto got = splice::OriginalRegistry::try_get_original<Fn>(-1);
+    EXPECT_FALSE(static_cast<bool>(got));
+    EXPECT_EQ(got.reason, splice::Refusal::out_of_range);
+    EXPECT_EQ(got.value, nullptr);
+
+    EXPECT_EQ(splice::OriginalRegistry::try_set_original<Fn>(-1, &fake_original_unary),
+              splice::Refusal::out_of_range);
+
+    const auto hook = splice::HookManager::try_get_hook<int, int>(-1);
+    EXPECT_FALSE(static_cast<bool>(hook));
+    EXPECT_EQ(hook.reason, splice::Refusal::out_of_range);
+    EXPECT_EQ(hook.value, nullptr);
+}
+
+TEST(CheckedAccessors, the_capacity_bound_is_refused_where_there_is_one) {
+    using Fn = int (*)(int);
+    const int cap = splice::default_context().slot_capacity();
+    if (cap == (std::numeric_limits<int>::max)()) {
+        GTEST_SKIP() << "this configuration's registry is unbounded (a map), "
+                        "so there is no bound to refuse at";
+    }
+
+    EXPECT_EQ(splice::OriginalRegistry::try_set_original<Fn>(cap, &fake_original_unary),
+              splice::Refusal::out_of_range);
+    EXPECT_EQ(splice::OriginalRegistry::try_get_original<Fn>(cap).reason,
+              splice::Refusal::out_of_range);
+
+    // The template argument list's comma has to be kept out of the macro, so
+    // the result lands in a local first.
+    const auto at_bound = splice::HookManager::try_get_hook<int, int>(cap);
+    EXPECT_EQ(at_bound.reason, splice::Refusal::out_of_range);
+
+    // One below it is a real slot, so the bound is the bound and not an
+    // off-by-one.
+    const auto below_bound = splice::HookManager::try_get_hook<int, int>(cap - 1);
+    EXPECT_EQ(below_bound.reason, splice::Refusal::ok);
+}
+
+TEST(CheckedAccessors, a_checked_hook_is_the_same_object_as_the_legacy_reference) {
+    const auto checked = splice::HookManager::try_get_hook<int, int>(kIdHookNoCallback);
+    ASSERT_TRUE(static_cast<bool>(checked));
+    auto& legacy = splice::HookManager::get_hook<int, int>(kIdHookNoCallback);
+    EXPECT_EQ(checked.value, &legacy)
+        << "the checked form must not be a second slot for the same id";
+}
+
+TEST(CheckedAccessors, the_legacy_setter_refuses_without_storing_and_without_crashing) {
+    using Fn = int (*)(int);
+
+    // The accepted limitation, asserted rather than described: this signature
+    // cannot report, so it logs and discards. What must not happen is a store
+    // at an out-of-range id or a dead process.
+    splice::OriginalRegistry::set_original<Fn>(-1, &fake_original_unary);
+    EXPECT_EQ(splice::OriginalRegistry::get_original<Fn>(-1), nullptr);
+
+    // And the reference-returning spelling hands back something usable rather
+    // than dereferencing a refusal.
+    auto& inert = splice::HookManager::get_hook<int, int>(-1);
+    inert.set_invoke([](int (*orig)(int), int x) { return orig ? orig(x) : x; });
+    SUCCEED() << "a refused reference lookup returned an object, not a crash";
 }
