@@ -307,10 +307,20 @@ struct PendingSite {
     // outlive the install, which is the same contract the C ABI states.
     const unsigned char* expected_prologue = nullptr;
 
+    // Whether this site can implement gating at all. False for a site adopted
+    // from somewhere that already wrapped its own callback: there is nothing
+    // left to wrap, so a group-wide gate cannot be applied to it. It is
+    // recorded rather than decided here -- the group refuses at install time,
+    // when it knows whether any group gate is actually in force.
+    bool can_gate = true;
+
     // Keeps the site's signature and callback alive without the group having
     // to know either. `group_bit` is the re-entrancy scope the whole group
-    // shares, applied unless this site named one of its own.
-    std::function<void(void* original, std::uint64_t group_bit)> publish;
+    // shares and `group_scope` is what owns that bit, both applied unless this
+    // site named a scope of its own. The scope travels with the bit because a
+    // bit without its owner is a number that can be reissued.
+    std::function<void(void* original, std::uint64_t group_bit,
+                       std::shared_ptr<Reentrancy> group_scope)> publish;
 
     // Only set for a site adopted from the installer queue: the entry that
     // owns the hook has its own notion of whether it is installed, and it has
@@ -650,7 +660,7 @@ public:
             // must find the original and the callback already there; the other
             // order is a live call through a null original, which this project
             // has paid for once already (FR-011 Phase 4.5d).
-            pending.publish(original, group_bit);
+            pending.publish(original, group_bit, m_group_scope);
 
             splice_patch_record record{};
             if (splice_vtable_swap(pending.slot, pending.stub, nullptr, &record) != 0) {
@@ -710,7 +720,7 @@ public:
         // registry's lock, and a lock taken while another thread is suspended
         // is how a process stops.
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
-            m_sites[i].publish(displaced[i], group_bit);
+            m_sites[i].publish(displaced[i], group_bit, m_group_scope);
         }
 
         std::vector<splice_patch_record> records(m_sites.size());
@@ -776,10 +786,16 @@ public:
         pending.target = target;
         pending.stub   = stub;
         // The entry's gates were wrapped around its callback when the action
-        // verb committed, so the group's scope does not apply here and the
-        // group_bit is deliberately ignored.
-        pending.publish = [p = std::move(publish)](void* original,
-                                                   std::uint64_t) { p(original); };
+        // verb committed, so there is nothing here for a group gate to wrap:
+        // the group_bit and the group's scope cannot be applied to this site
+        // at all. Recorded, not silently dropped -- `ready()` refuses the
+        // whole transaction if a group gate is in force while any site cannot
+        // honour it, because installing without the protection that was asked
+        // for IS the double run the caller was preventing.
+        pending.can_gate = false;
+        pending.publish = [p = std::move(publish)](
+                              void* original, std::uint64_t,
+                              std::shared_ptr<Reentrancy>) { p(original); };
         pending.settle = std::move(settle);
         pending.expected_prologue = expected_prologue;
         m_sites.push_back(std::move(pending));
@@ -869,8 +885,9 @@ public:
         pending.expected_prologue = expected_prologue;
         pending.publish = [slot_id = pending.registry_slot, gates = std::move(gates),
                            fn = std::move(fn),
-                           needs_original](void* original,
-                                           std::uint64_t group_bit) mutable {
+                           needs_original](
+                              void* original, std::uint64_t group_bit,
+                              std::shared_ptr<Reentrancy> group_scope) mutable {
             detail::Gates site_gates = gates;
             // A scope named on the site itself wins; otherwise the group's
             // applies. Nothing merges two scopes: a hook is inside one scope
@@ -878,6 +895,18 @@ public:
             if (!site_gates.reentry_requested && group_bit != 0) {
                 site_gates.reentry_bit = group_bit;
                 site_gates.reentry_requested = true;
+                // And the scope that owns the bit, which is the part that was
+                // missing. `~Reentrancy()` returns its bit to the pool
+                // unconditionally, so a hook that outlives the builder and
+                // kept only the number would gate on a bit a later, unrelated
+                // scope can be handed -- and suppress its callbacks whenever
+                // that scope was active. The published gates are moved into
+                // the stored callback, so holding the scope here is what keeps
+                // it alive for as long as anything can still use the bit.
+                // Empty when the caller named its own `Reentrancy`: that one
+                // is the caller's to outlive the hooks, which is the contract
+                // the two-argument `non_reentrant` states.
+                site_gates.owned_scope = std::move(group_scope);
             }
             Binder::publish(slot_id, original, std::move(site_gates), fn,
                             needs_original);
@@ -922,6 +951,25 @@ private:
                         "a scope (64 in use); the group will not install");
             fail(Stage::prepare, Operation::none, 0);
             return false;
+        }
+        // A group gate asked for, and a site that cannot carry one. Checked
+        // here because this is the first point that knows both: a gate may be
+        // named after the sites are, which is true of every other gate in this
+        // library, so the site-time answer would have been the wrong answer at
+        // the wrong moment.
+        if (m_group_reentry_requested) {
+            for (const auto& pending : m_sites) {
+                if (pending.can_gate) continue;
+                SPLICE_LOGE("splice: site %zu was adopted with its callback "
+                            "already wrapped, so the group's non_reentrant() "
+                            "cannot be applied to it. The group is refused "
+                            "rather than installed without the protection that "
+                            "was asked for -- name the scope on the site that "
+                            "owns that callback instead.",
+                            pending.site.ordinal);
+                fail(Stage::prepare, Operation::none, 0, pending.site);
+                return false;
+            }
         }
         return true;
     }

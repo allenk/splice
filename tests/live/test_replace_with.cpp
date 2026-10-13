@@ -180,6 +180,46 @@ TEST_F(ReplaceWith, a_gate_asked_for_alongside_it_is_refused_not_ignored) {
         << "a refused group published an original";
 }
 
+TEST_F(ReplaceWith, a_group_scope_asked_for_alongside_it_is_refused_too) {
+    // The same assertion as the per-site gate above, from the end that was
+    // missing until 2026-10-13. A group-wide non_reentrant() is not a site
+    // gate: it is set on the builder, so the verb's own check -- which looks at
+    // the site's gates -- saw nothing and accepted. The install then succeeded
+    // with no protection at all, because an adopted site's callback is already
+    // wrapped and there is nothing left for the group's scope to wrap.
+    //
+    // A caller who asked for group-wide recursion protection and got a
+    // successful install had exactly the double run, or the recursion, they
+    // were preventing.
+    splice::Live<> group;
+    const splice::Outcome refused = group
+        .at(reinterpret_cast<void*>(&batch_target_a), TargetFn{})
+            .replace_with(&replacement_a, g_original_a)
+        .non_reentrant()
+        .install(splice::live);
+
+    EXPECT_EQ(refused.state(), splice::State::refused);
+    EXPECT_EQ(refused.installed_sites(), 0u);
+    EXPECT_EQ(batch_target_a(kArg), kPlainA) << "a refused group wrote anyway";
+    EXPECT_EQ(g_original_a.load(std::memory_order_acquire), nullptr)
+        << "a refused group published an original";
+}
+
+TEST_F(ReplaceWith, the_scope_is_refused_whichever_order_it_is_named_in) {
+    // Gates compose in any order everywhere else in splice, so the refusal has
+    // to as well -- and this is the order that proves the check cannot live at
+    // the site: when the verb runs, the group has no scope yet.
+    splice::Live<> group;
+    const splice::Outcome refused = group
+        .non_reentrant()
+        .at(reinterpret_cast<void*>(&batch_target_a), TargetFn{})
+            .replace_with(&replacement_a, g_original_a)
+        .install(splice::live);
+
+    EXPECT_EQ(refused.state(), splice::State::refused);
+    EXPECT_EQ(batch_target_a(kArg), kPlainA);
+}
+
 TEST_F(ReplaceWith, it_composes_with_the_prologue_expectation) {
     // Both guards on one site, which is the shape the consumer's product path
     // needs: its own replacement, and a refusal if the target no longer begins

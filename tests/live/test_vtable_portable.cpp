@@ -19,7 +19,9 @@
 #include "vtable_provider.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -262,6 +264,67 @@ TEST_F(VtableGroup, the_group_gate_suppresses_the_sibling_inside_the_delegating_
     // `scale` from outside any hook still runs its callback.
     EXPECT_EQ(calc->scale(5), 15);
     EXPECT_EQ(g_scale_calls.load(), 1);
+}
+
+// How many re-entrancy scopes the process can still reserve. Reserving them
+// all and letting them go is the only way to ask, and it is enough: the
+// question here is a difference, not an absolute.
+static std::size_t free_reentrancy_scopes() {
+    std::vector<std::unique_ptr<splice::Reentrancy>> held;
+    for (;;) {
+        auto scope = std::make_unique<splice::Reentrancy>();
+        if (!scope->valid()) break;
+        held.push_back(std::move(scope));
+    }
+    return held.size();   // every one of them is released on the way out
+}
+
+TEST_F(VtableGroup, a_group_scope_is_retained_by_what_was_published) {
+    // Until 2026-10-13 publication copied the group's re-entrancy *bit* into
+    // the published gates and never the scope that owns it. `~Reentrancy()`
+    // returns its bit to the pool unconditionally, so once the builder died
+    // the installed hooks were gating on a number the pool could hand to a
+    // later, unrelated scope -- which would then have its callbacks suppressed
+    // whenever the surviving hook's scope was active.
+    //
+    // The pool's own count is the observable, and a difference is all this
+    // needs: a bit that is still held cannot be counted as free.
+    ICalculator* calc = splice::test::calculator();
+
+    const std::size_t before = free_reentrancy_scopes();
+    ASSERT_GT(before, 1u) << "the scope pool is exhausted; this test cannot speak";
+
+    {
+        // A temporary builder: it is destroyed before the assertion below,
+        // which is the point. The scope it created has to outlive it, because
+        // the hooks it published still gate on that bit.
+        m_outcome = splice::Vtable<ICalculator>{calc}
+            .on(&ICalculator::scale, [](auto orig, ICalculator* self, int value) {
+                return orig(self, value);
+            })
+            .non_reentrant()
+            .install(splice::slot_swap);
+        ASSERT_EQ(m_outcome.state(), splice::State::installed);
+    }
+
+    EXPECT_EQ(free_reentrancy_scopes(), before - 1)
+        << "the group's scope was dropped with its builder, so its bit is back "
+           "in the pool while hooks are still gating on it";
+
+    // The behavioural half: the gate still works after the builder is gone.
+    EXPECT_EQ(calc->scale(5), 15);
+
+    ASSERT_TRUE(m_outcome.disable());
+
+    // And it stays held after disable, which is the honest consequence rather
+    // than an oversight. The published callback holds the scope, disable is a
+    // switch rather than a drain, and the dispatch identity behind that slot is
+    // never reissued -- so nothing will ever overwrite the gates that hold it.
+    // A scope taken by `non_reentrant()` is spent for the process, exactly like
+    // the stub identity beside it. `non_reentrant(const Reentrancy&)` is the
+    // way to own one yourself and not spend one.
+    EXPECT_EQ(free_reentrancy_scopes(), before - 1)
+        << "a spent scope is spent; see non_reentrant(const Reentrancy&)";
 }
 
 TEST_F(VtableGroup, a_per_method_gate_works_inside_a_group) {
