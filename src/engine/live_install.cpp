@@ -71,6 +71,46 @@ void release_threads(LiveGroup& group, const NativeThreadOps& ops) noexcept {
     group.threads.clear();
 }
 
+// Owns a group being prepared until `prepare` decides to hand it back.
+//
+// `prepare` takes two things out of the process that have to go back if it
+// does not succeed: page protection on every site it made writable, and a
+// handle on every thread it opened. It used to put them back by hand on each
+// failure path -- five of them -- and not at all if a vector operation threw,
+// because the group was a raw pointer. A leaked group there is not a leaked
+// allocation: it is a process left with writable code pages and a set of
+// thread handles nobody will close.
+//
+// So the guard performs exactly what `splice_live_release` performs, in the
+// order that function performs it -- close the thread references, then restore
+// the protection, then free the group -- and every failure path is now a plain
+// `return`.
+struct PreparedGroupGuard {
+    LiveGroup*              group = nullptr;
+    const NativeThreadOps*  ops   = nullptr;
+
+    PreparedGroupGuard(LiveGroup* g, const NativeThreadOps* o) noexcept
+        : group(g), ops(o) {}
+
+    ~PreparedGroupGuard() {
+        if (group == nullptr) return;
+        release_threads(*group, *ops);
+        restore_site_protection(*group);
+        delete group;
+    }
+
+    PreparedGroupGuard(const PreparedGroupGuard&) = delete;
+    PreparedGroupGuard& operator=(const PreparedGroupGuard&) = delete;
+
+    // The group survives: the caller now owns it and `splice_live_release` is
+    // what puts these two things back.
+    [[nodiscard]] LiveGroup* keep() noexcept {
+        LiveGroup* kept = group;
+        group = nullptr;
+        return kept;
+    }
+};
+
 #endif  // SPLICE_HAS_X86_64_BACKEND
 
 } // namespace
@@ -103,8 +143,14 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
     }
 
     const NativeThreadOps ops;
-    auto group = new (std::nothrow) LiveGroup();
-    if (group == nullptr) return refuse(LiveOperation::none, 0, 0);
+    auto* raw = new (std::nothrow) LiveGroup();
+    if (raw == nullptr) return refuse(LiveOperation::none, 0, 0);
+
+    // From here on the guard owns it. Every refusal below is a plain return,
+    // and so is an exception out of any of the vector operations: the pages go
+    // back and the thread handles close either way.
+    PreparedGroupGuard owned(raw, &ops);
+    LiveGroup* group = raw;
 
     // Every target made writable, snapshotted and planned. Nothing is written.
     group->sites.resize(count);
@@ -125,8 +171,6 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
         // an `E9` too, and following one walks into our own relay.
         site.target = splice::engine::unwrap_jump_stub(sites[i].target);
         if (site.target == nullptr || sites[i].replacement == nullptr) {
-            restore_site_protection(*group);
-            delete group;
             return refuse(LiveOperation::prepare_site, i, 0);
         }
 
@@ -142,8 +186,6 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
         if (splice::engine::is_own_patch_site(site.target)) {
             SPLICE_LOGE("splice_live_prepare: site %u at %p is already patched "
                         "by splice; chaining is not implemented", i, site.target);
-            restore_site_protection(*group);
-            delete group;
             return refuse(LiveOperation::prepare_site, i, 0);
         }
 
@@ -157,8 +199,6 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
             SPLICE_LOGE("splice_live_prepare: site %u at %p cannot be made "
                         "writable; it may not be mapped executable code",
                         i, site.target);
-            restore_site_protection(*group);
-            delete group;
             return refuse(LiveOperation::prepare_site, i, os::last_error());
         }
         site.made_writable = true;
@@ -168,8 +208,6 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
             std::memcmp(site.snapshot, sites[i].expected, kSiteWindow) != 0) {
             SPLICE_LOGE("splice_live_prepare: site %u at %p does not hold the "
                         "bytes the caller expected", i, site.target);
-            restore_site_protection(*group);
-            delete group;
             return refuse(LiveOperation::prepare_site, i, 0);
         }
 
@@ -178,8 +216,6 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
             SPLICE_LOGE("splice_live_prepare: site %u at %p could not be planned "
                         "(prologue not relocatable, or the patch does not fit one "
                         "aligned quadword)", i, site.target);
-            restore_site_protection(*group);
-            delete group;
             return refuse(LiveOperation::prepare_site, i, 0);
         }
         site.copy_size = site.plan.copy_size();
@@ -192,7 +228,15 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
     // snapshot costs about 118 ms -- Toolhelp walks every thread on the
     // machine, not this process's -- and because an incomplete thread set is
     // the one thing coordination cannot be built on.
+    //
+    // The storage is reserved **before** the handles are opened, which is not
+    // tidiness: `resize` after the enumeration can allocate, and an allocation
+    // failure there used to drop every handle this call had just opened, with
+    // nothing left holding them. Reserving first makes the resize below
+    // incapable of allocating, so there is no window between opening a handle
+    // and owning it.
     std::vector<os::ThreadRef> refs(kMaxEnlistedThreads);
+    group->threads.reserve(kMaxEnlistedThreads);
     const auto enumeration = ops.enumerate(std::span<os::ThreadRef>(refs));
     group->threads.resize(enumeration.count);
     for (std::size_t i = 0; i < enumeration.count; ++i) {
@@ -203,15 +247,12 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
         SPLICE_LOGE("splice_live_prepare: thread enumeration is not usable "
                     "(status=%d, %zu opened)", static_cast<int>(enumeration.status),
                     enumeration.count);
-        release_threads(*group, ops);
-        restore_site_protection(*group);
-        delete group;
         return refuse(LiveOperation::enumerate, 0, os::last_error());
     }
 
     group->prepared = true;
     fill_outcome(out, LiveState::refused, LiveFailure{});   // not committed yet
-    return group;
+    return owned.keep();
 }
 
 void splice_live_commit(void* handle, splice_patch_record* records_out,

@@ -110,7 +110,11 @@ enum class State {
 
 // Where an attempt stopped. The slot_swap tier reaches only `prepare` and
 // `write`; the rest belong to the coordinated tier.
-enum class Stage { none, prepare, enlist, map, write, migrate, flush, resume };
+// `settle` is the only one of these that happens *after* the hooks are live:
+// it is the caller's own bookkeeping callback, and a failure there does not
+// mean the install failed. It means the install succeeded and the caller may
+// not know it. Added at the end, so an existing switch keeps compiling.
+enum class Stage { none, prepare, enlist, map, write, migrate, flush, resume, settle };
 
 // What was being attempted when it stopped.
 enum class Operation {
@@ -227,6 +231,78 @@ private:
         static std::atomic<bool> flags[kCount]{};
         return flags;
     }
+};
+
+// ─── running a caller's closure where a throw cannot be allowed out ───────
+//
+// `settle` and the publication closures come from the caller, and two of them
+// run at moments where unwinding would be worse than any failure they could
+// report: after the patches are live, and while a prepared handle is holding
+// writable pages open. A throw there used to unwind past the live group and
+// take the outcome with it, so the caller lost the hooks *and* the ability to
+// name them.
+//
+// Declaring them `noexcept` was considered and rejected: that terminates the
+// host on a caller's bug, which is not this library's decision to make.
+//
+// Conditional on the build having exceptions at all. This library is meant to
+// compile with them disabled, and a `catch` in a header would not. With them
+// off there is nothing to catch and the call is made directly, which is the
+// same code those builds have always had.
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND) || defined(__EXCEPTIONS)
+#   define SPLICE_LIVE_HAS_EXCEPTIONS 1
+#else
+#   define SPLICE_LIVE_HAS_EXCEPTIONS 0
+#endif
+
+// Returns false when the closure threw. The caller decides what that means --
+// here it is always a recorded failure that leaves the install standing.
+template <typename Fn>
+[[nodiscard]] bool run_without_unwinding(Fn&& fn) noexcept {
+#if SPLICE_LIVE_HAS_EXCEPTIONS
+    try {
+        fn();
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    fn();
+    return true;
+#endif
+}
+
+// Owns a prepared handle until the install decides it is done with it.
+//
+// Between `splice_live_prepare` and `splice_live_release` the process has
+// writable code pages and open thread handles, and the fluent layer used to
+// hold that handle as a bare `void*` across a publication loop and a vector
+// construction. Either can throw, and the handle would have leaked -- which is
+// not a leaked allocation but a process left in a state only this library
+// knows how to undo.
+class PreparedHandle {
+public:
+    explicit PreparedHandle(void* handle) noexcept : m_handle(handle) {}
+
+    ~PreparedHandle() {
+        if (m_handle != nullptr) splice_live_release(m_handle);
+    }
+
+    PreparedHandle(const PreparedHandle&) = delete;
+    PreparedHandle& operator=(const PreparedHandle&) = delete;
+
+    [[nodiscard]] void* get() const noexcept { return m_handle; }
+
+    // Release now, because the commit is done and the engine's contract says
+    // the handle goes back immediately after it.
+    void release() noexcept {
+        if (m_handle == nullptr) return;
+        splice_live_release(m_handle);
+        m_handle = nullptr;
+    }
+
+private:
+    void* m_handle = nullptr;
 };
 
 // ─── binding one site, with its signature in hand ─────────────────────────
@@ -660,15 +736,27 @@ public:
             // must find the original and the callback already there; the other
             // order is a live call through a null original, which this project
             // has paid for once already (FR-011 Phase 4.5d).
-            pending.publish(original, group_bit, m_group_scope);
-
-            splice_patch_record record{};
-            if (splice_vtable_swap(pending.slot, pending.stub, nullptr, &record) != 0) {
+            if (!detail::run_without_unwinding(
+                    [&] { pending.publish(original, group_bit, m_group_scope); })) {
+                SPLICE_LOGE("splice: publishing site %zu threw; nothing has been "
+                            "written for it and the group is undone",
+                            pending.site.ordinal);
                 return undo(group, pending.site, Operation::write_slot);
             }
+
+            // The record's slot exists before the write, so the only thing the
+            // post-write path does is fill in a trivially copyable struct.
+            // Copying the settle closure allocates, and doing that after the
+            // pointer is swapped is an allocation on a live site.
             group->sites.push_back(detail::InstalledSite{
-                static_cast<void*>(pending.slot), record,
+                static_cast<void*>(pending.slot), splice_patch_record{},
                 pending.settle});
+            splice_patch_record record{};
+            if (splice_vtable_swap(pending.slot, pending.stub, nullptr, &record) != 0) {
+                group->sites.pop_back();
+                return undo(group, pending.site, Operation::write_slot);
+            }
+            group->sites.back().record = record;
         }
         return installed(group);
     }
@@ -716,16 +804,45 @@ public:
             return refusal();
         }
 
+        // From here the handle is owned. Everything between prepare and
+        // release -- the publication loop, the records vector, a throw out of
+        // a caller's closure -- happens with the pages writable and the thread
+        // handles open, and all of it used to be held under a bare void*.
+        detail::PreparedHandle prepared(handle);
+
+        // The group's records are built **before** the commit, for the reason
+        // the whole three-call order exists: `InstalledSite` holds a
+        // `std::function`, copying one allocates, and the post-commit path must
+        // not allocate on a live group.
+        auto group = std::make_shared<detail::GroupState>();
+        group->sites.reserve(m_sites.size());
+        for (auto& pending : m_sites) {
+            group->sites.push_back(detail::InstalledSite{
+                pending.target, splice_patch_record{}, pending.settle});
+        }
+
         // Published while nothing is suspended, on purpose: this takes the
         // registry's lock, and a lock taken while another thread is suspended
         // is how a process stops.
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
-            m_sites[i].publish(displaced[i], group_bit, m_group_scope);
+            if (detail::run_without_unwinding(
+                    [&] { m_sites[i].publish(displaced[i], group_bit, m_group_scope); })) {
+                continue;
+            }
+            // Nothing is written yet, so this is a clean refusal -- and the
+            // handle goes back through the guard rather than being leaked by
+            // the unwind that used to happen here.
+            SPLICE_LOGE("splice: publishing site %zu threw; the group is refused "
+                        "before anything was written",
+                        m_sites[i].site.ordinal);
+            fail(Stage::prepare, Operation::none, 0, m_sites[i].site);
+            release_pending();
+            return refusal();
         }
 
         std::vector<splice_patch_record> records(m_sites.size());
-        splice_live_commit(handle, records.data(), &engine_outcome);
-        splice_live_release(handle);
+        splice_live_commit(prepared.get(), records.data(), &engine_outcome);
+        prepared.release();
         m_threads = engine_outcome.threads;
 
         if (engine_outcome.state != SPLICE_LIVE_INSTALLED) {
@@ -750,12 +867,33 @@ public:
             return undone;
         }
 
-        auto group = std::make_shared<detail::GroupState>();
-        group->sites.reserve(m_sites.size());
+        // The hooks are live. From here nothing may allocate and nothing may
+        // unwind: the records are already built, so this assigns PODs, and a
+        // caller's settle closure is run where a throw is recorded instead of
+        // escaping. A throw used to unwind past the live group and take the
+        // outcome with it, so the caller lost the hooks and any way to name
+        // them.
+        bool settle_threw = false;
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
-            if (m_sites[i].settle) m_sites[i].settle(&records[i]);
-            group->sites.push_back(detail::InstalledSite{
-                m_sites[i].target, records[i], m_sites[i].settle});
+            group->sites[i].record = records[i];
+            if (!m_sites[i].settle) continue;
+            if (detail::run_without_unwinding([&] { m_sites[i].settle(&records[i]); })) {
+                continue;
+            }
+            settle_threw = true;
+            SPLICE_LOGE("splice: the settle callback for site %zu threw after the "
+                        "hooks were installed. The group stays installed and this "
+                        "outcome carries it -- the hooks are real and disable() "
+                        "works -- but the entry that owns that callback may not "
+                        "know it is installed.",
+                        m_sites[i].site.ordinal);
+        }
+        if (settle_threw) {
+            // Recorded, and deliberately not fatal: the hooks are in, the
+            // outcome carries the group, and `disable()` works. What the
+            // caller has lost is its own notification, which is why the stage
+            // says `settle` rather than `write`.
+            fail(Stage::settle, Operation::none, 0);
         }
         return installed(group);
     }

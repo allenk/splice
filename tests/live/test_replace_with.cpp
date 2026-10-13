@@ -26,6 +26,8 @@
 
 #include <splice/live.h>
 
+#include <stdexcept>
+
 #include "test_targets.h"
 
 #include <atomic>
@@ -257,4 +259,39 @@ TEST_F(ReplaceWith, it_composes_with_the_prologue_expectation) {
         .install(splice::live);
     ASSERT_EQ(outcome.state(), splice::State::installed);
     EXPECT_EQ(batch_target_a(kArg), kPlainA + 1);
+}
+
+// ─── a caller's closure cannot unwind out of a live install ───────────────
+// The guard itself, exercised directly. Two of the places a caller's closure
+// runs -- publication, with a prepared handle holding writable pages open, and
+// settle, after the hooks are in -- cannot be allowed to unwind: the first
+// leaks the handle, and the second takes the outcome with it, so the caller
+// loses both the hooks and any way to name them.
+//
+// Direct, because neither closure has a public injection point in this tree:
+// publication closures are built by the library, and `settle` is built by
+// `join_group` for a queued entry. So this asserts the mechanism, and the
+// integration is asserted only in the sense that every install in this suite
+// now runs through it.
+TEST(RunWithoutUnwinding, a_throwing_closure_is_reported_and_not_propagated) {
+    bool ran = false;
+    EXPECT_TRUE(splice::detail::run_without_unwinding([&] { ran = true; }));
+    EXPECT_TRUE(ran);
+
+#if SPLICE_LIVE_HAS_EXCEPTIONS
+    int after = 0;
+    EXPECT_FALSE(splice::detail::run_without_unwinding([&] {
+        throw std::runtime_error("a caller's closure failing");
+    }));
+    // The point: control is here rather than three frames up.
+    after = 1;
+    EXPECT_EQ(after, 1);
+
+    // Anything, not just std::exception -- a caller's bug is not required to
+    // throw something polite.
+    EXPECT_FALSE(splice::detail::run_without_unwinding([] { throw 7; }));
+#else
+    GTEST_SKIP() << "this build has exceptions disabled, so there is nothing "
+                    "to catch and the guard calls through";
+#endif
 }
