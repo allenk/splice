@@ -15,17 +15,23 @@ namespace {
 
 // Synthetic registry ids, expressed against the capacity rather than written
 // as round numbers. The hot-path registries are selected at build time and the
-// default is a fixed array of SPLICE_MAX_HOOKS entries, so an id is an index,
-// not a label: 30001 was a perfectly good name under the old map and is out of
-// range under the array. Counting down from the top also keeps these clear of
-// the low slots `HookContext::slot_for` issues to real hooks in this process.
-constexpr int kIdOriginalRoundTrip   = SPLICE_MAX_HOOKS - 1;
-constexpr int kIdOriginalByKey       = SPLICE_MAX_HOOKS - 2;
-constexpr int kIdNothingStored       = SPLICE_MAX_HOOKS - 3;
-constexpr int kIdHookNoCallback      = SPLICE_MAX_HOOKS - 4;
-constexpr int kIdHookWithCallback    = SPLICE_MAX_HOOKS - 5;
-constexpr int kIdHookIntSignature    = SPLICE_MAX_HOOKS - 6;
-constexpr int kIdHookDoubleSignature = SPLICE_MAX_HOOKS - 7;
+// default indexes an array by id, so an id is an index, not a label: 30001 was
+// a perfectly good name under the old map and is out of range under the array.
+// Counting down from the top also keeps these clear of the low slots
+// `HookContext::slot_for` issues to real hooks in this process.
+//
+// The capacity comes from the library at runtime, not from the preprocessor.
+// Since 2026-10-13 `SPLICE_MAX_HOOKS` is private to the library's own build --
+// the slot arrays live behind pointers, so no consumer's layout depends on it
+// and no consumer is told the value. A test is a consumer like any other.
+const int kCapacity              = splice::detail::configured_capacity();
+const int kIdOriginalRoundTrip   = kCapacity - 1;
+const int kIdOriginalByKey       = kCapacity - 2;
+const int kIdNothingStored       = kCapacity - 3;
+const int kIdHookNoCallback      = kCapacity - 4;
+const int kIdHookWithCallback    = kCapacity - 5;
+const int kIdHookIntSignature    = kCapacity - 6;
+const int kIdHookDoubleSignature = kCapacity - 7;
 
 } // namespace
 

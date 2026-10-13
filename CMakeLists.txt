@@ -370,13 +370,25 @@ target_compile_definitions(splice PUBLIC
     $<$<CONFIG:Debug>:PLOG_LEVEL=0>
 )
 
-# The registry selection, carried to every consumer. PUBLIC is the whole point:
-# a consumer that compiled a different value would read the library's shared
-# HookContext at the wrong offsets, so the definition travels with the target
-# rather than being something each build has to repeat. splice/context.h checks
-# at first use that the library and the caller still agree.
+# The registry selection is carried to every consumer, because it still
+# chooses a type the headers can see: a consumer that compiled a different
+# value would read the library's shared HookContext at the wrong offsets, so
+# the definition travels with the target rather than being something each build
+# has to repeat. splice/context.h checks at first use that the library and the
+# caller still agree.
 target_compile_definitions(splice PUBLIC
     SPLICE_REGISTRY_IMPL=${SPLICE_REGISTRY_IMPL}
+)
+
+# The capacity is PRIVATE, and that is the point of it rather than an
+# oversight. Since 2026-10-13 the slot arrays live behind pointers allocated in
+# src/context.cpp, so no header-visible layout or inline expression depends on
+# this value -- which means a consumer compiled with a different one has
+# nothing to misread, and does not need to be told. Three review rounds were
+# spent trying to detect that disagreement instead; removing it needs no
+# detector. Anything that needs the number at runtime asks
+# splice::detail::configured_capacity().
+target_compile_definitions(splice PRIVATE
     SPLICE_MAX_HOOKS=${SPLICE_MAX_HOOKS}
 )
 

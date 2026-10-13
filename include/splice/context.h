@@ -92,9 +92,13 @@ using GroupJoin = std::function<bool(GroupContribution&)>;
 
 // ─── Build-configuration guard ────────────────────────────────────────────
 // `library_context_size()` is defined in src/context.cpp, so it reports the
-// layout the *compiled library* sees. SPLICE_REGISTRY_IMPL and SPLICE_MAX_HOOKS
-// change sizeof(HookContext) -- 408 bytes against 4472 on x86_64 -- and
-// src/context.cpp owns the single HookContext every translation unit shares.
+// layout the *compiled library* sees. SPLICE_REGISTRY_IMPL changes
+// sizeof(HookContext), because it selects which registry type the context
+// holds, and src/context.cpp owns the single HookContext every translation
+// unit shares. SPLICE_MAX_HOOKS no longer does: since 2026-10-13 the slot
+// arrays live behind pointers allocated in the library, so the capacity
+// affects no layout a consumer can see -- which is why there is nothing left
+// to detect about it.
 // A consumer compiled with a different value would therefore read that
 // instance's members at the wrong offsets: no diagnostic, no crash, until a
 // function pointer read out of the originals table at the wrong offset is
@@ -121,11 +125,14 @@ template <typename ContextT>
         if (library == sizeof(ContextT)) return true;
         SPLICE_LOGE("splice: build mismatch -- this translation unit sees "
                     "sizeof(HookContext)=%zu and libsplice was built with %zu. "
-                    "SPLICE_REGISTRY_IMPL and SPLICE_MAX_HOOKS must be the same "
-                    "for the library and every consumer; link splice::splice and "
-                    "it carries them. Every hook from this translation unit is "
-                    "refused: reading the shared context at these offsets would "
-                    "dispatch through a pointer taken from the wrong place.",
+                    "SPLICE_REGISTRY_IMPL must be the same for the library and "
+                    "every consumer; link splice::splice and it carries it. "
+                    "Every hook from this translation unit is refused: reading "
+                    "the shared context at these offsets would dispatch through "
+                    "a pointer taken from the wrong place. (The capacity is no "
+                    "longer part of this: it is a runtime value behind a "
+                    "pointer, so a build that disagrees about SPLICE_MAX_HOOKS "
+                    "has nothing here to misread.)",
                     sizeof(ContextT), library);
         return false;
     }();
@@ -196,6 +203,33 @@ class HookBase {
 public:
     virtual ~HookBase() = default;
 };
+
+// ─── Slot storage, owned by the library ─────────────────────────────────────
+// The configured capacity and the two slot arrays live behind these functions
+// and nowhere else, which is what takes the capacity out of this header's ABI:
+// no member layout, no inline expression and no template argument below
+// depends on it, so a translation unit built with a different capacity has
+// nothing it can misread.
+//
+// That is a deliberate retreat from detecting the disagreement. A runtime
+// comparison cannot be made reliably private to one translation unit, a
+// configuration-tagged symbol cannot reach code a consumer wrote inline in its
+// own headers, and a value baked into a macro expansion is discarded with the
+// body that carried it. Removing the dependency needs none of them to work.
+//
+// Allocation never throws and returns nullptr on failure, because its first
+// caller is `default_context()`'s own construction -- which is noexcept, and
+// which runs inside someone else's process.
+namespace detail {
+
+[[nodiscard]] int configured_capacity() noexcept;
+
+[[nodiscard]] std::atomic<void*>* allocate_original_slots(int count) noexcept;
+[[nodiscard]] std::atomic<HookBase*>* allocate_hook_slots(int count) noexcept;
+void free_original_slots(std::atomic<void*>* slots) noexcept;
+void free_hook_slots(std::atomic<HookBase*>* slots) noexcept;
+
+} // namespace detail
 
 // ─── HookStorage<Policy, Ret, Args...> ──────────────────────────────────────
 // FR-010 hot-path callback storage. One partial spec per policy tag from
@@ -373,57 +407,59 @@ public:
         return m_hooks.size();
     }
 
-    // A map takes any id, so this implementation imposes no capacity.
-    static constexpr int kCapacity = (std::numeric_limits<int>::max)();
+    // A map takes any id, so this implementation imposes no capacity. The
+    // runtime spelling exists so `HookContext` can ask both registries the
+    // same question without knowing which one it has.
+    [[nodiscard]] int capacity() const noexcept {
+        return (std::numeric_limits<int>::max)();
+    }
+    [[nodiscard]] bool storage_ok() const noexcept { return true; }
+    void release_storage() noexcept {}
 
 private:
     mutable std::shared_mutex                                m_mutex;
     std::unordered_map<int, std::shared_ptr<HookBase>>       m_hooks;
 };
 
-// rcu_atomic_array — Step 6.2 (publish-and-reclaim). Reader is a single
-// std::memory_order_acquire load on the snapshot pointer; no atomic RMW
-// on the hot path. Writer copies the snapshot, fills the new slot,
-// publishes the new pointer with release semantics, and retires the old
-// pointer with a wall-clock timestamp.
+// rcu_atomic_array — a flat array of atomic slot pointers, one per id, and
+// nothing else. Reader is a single acquire load on a line nobody writes, which
+// is why it stays Shared on every core and costs no coherence traffic.
 //
-// ── Reclamation strategy (Step 6.4 — time-deferred, deviating from the
-// classical EBR sketched in the Step 6 design doc) ───────────────────────
-// Standard epoch-based reclamation marks reader critical sections with a
-// thread-local atomic store on entry and exit. For Splice this would add
-// ~3-9 ns to every trampoline call, eating the entire FR-010 6.2/6.3 gain.
+// ── Why there is no snapshot any more (2026-10-13) ────────────────────────
+// This specialisation used to publish an immutable snapshot and retire the
+// previous one with a wall-clock timestamp, freeing it 100 ms later on the
+// assumption that no reader could still be inside it. An external review
+// refuted that: a reader loads the snapshot pointer and *then* dereferences
+// the array, and a thread preempted between those two steps -- or stopped in a
+// debugger, or descheduled on a loaded phone -- exceeds any grace period.
+// `size()` was worse, traversing every slot of an unpinned snapshot. Elapsed
+// time is not quiescence, and the hook objects surviving in the next
+// snapshot's shared_ptr copies did not help: what the reader dereferences
+// first is the array, and nothing kept that alive.
 //
-// Instead, we trust the Splice reader model:
-//   - Every reader (the trampoline) completes in ns-μs
-//   - Writers (install_slot) are cold-path, lock-serialised
-//   - After publish, ANY in-flight reader using the old snapshot will
-//     have finished within a small wall-clock grace period
+// Reclaiming it correctly needs reader registration or hazard pointers, which
+// costs the hot path the whole reason this implementation exists. So nothing is
+// reclaimed: one array for the life of the context, and hook objects that live
+// for the life of the process. That is the same bargain the trampolines and the
+// published callbacks already make here, and it is recorded in
+// `.lsan-suppressions.txt` rather than hidden.
 //
-// Strategy:
-//   - On write: push (snap*, now) onto m_retire
-//   - On every subsequent write: drain anything older than kGracePeriodMs
-//     while still holding m_write_mutex. Since the next writer arrives
-//     orders of magnitude later than any reader's window, the grace
-//     period is effectively infinite from the reader's perspective.
-//
-// Pathological case: a reader thread that is preempted mid-trampoline for
-// > 100 ms could observe a freed snapshot. In practice the OS scheduler's
-// preemption quantum is typically 1–10 ms; 100 ms is 10–100× headroom.
-// Documented limitation; user can rebuild with a larger grace period.
-//
-// Snapshot bound: SPLICE_MAX_HOOKS (default 512). Out-of-range ids hard-
-// abort with SPLICE_LOGE — a hook id from __COUNTER__ above the bound is
-// a programming error, not a recoverable condition.
+// Capacity is a runtime value from `detail::configured_capacity()`, not a
+// template argument or an array bound, so nothing in this header's layout
+// depends on it.
 template <>
 class HookRegistry<registry::rcu_atomic_array> {
 public:
-    HookRegistry() = default;
+    HookRegistry() noexcept
+        : m_slots(detail::allocate_hook_slots(detail::configured_capacity())),
+          m_capacity(m_slots != nullptr ? detail::configured_capacity() : 0) {}
 
     ~HookRegistry() {
-        // At registry teardown: nothing is reading anymore (otherwise the
-        // user violated the lifetime contract). Free everything.
-        delete m_snapshot.load(std::memory_order_acquire);
-        for (auto& e : m_retire) delete e.snap;
+        // The slot array goes; the hooks in it do not. Nothing here can
+        // establish that no thread holds a pointer to one -- that is the same
+        // missing protocol the trampolines are never reclaimed for -- and at
+        // teardown the process is ending anyway.
+        detail::free_hook_slots(m_slots);
     }
 
     HookRegistry(const HookRegistry&) = delete;
@@ -433,132 +469,94 @@ public:
 
     template <typename HookT>
     HookT& get_or_create(int id) {
-        // ── Fast path — single acquire-load, pure read, no atomic RMW ──
-        auto* snap = m_snapshot.load(std::memory_order_acquire);
-        if (snap && id >= 0 && id < static_cast<int>(snap->slots.size())
-            && snap->slots[static_cast<std::size_t>(id)]) {
-            return *static_cast<HookT*>(
-                snap->slots[static_cast<std::size_t>(id)].get());
+        // ── Fast path — one acquire load, no atomic RMW, nothing to reclaim ──
+        if (m_slots != nullptr && id >= 0 && id < m_capacity) {
+            if (auto* hook = m_slots[id].load(std::memory_order_acquire)) {
+                return *static_cast<HookT*>(hook);
+            }
         }
         return install_slot<HookT>(id);
     }
 
+    // Detach every slot without destroying anything already published: a
+    // reader holding one of these pointers finishes against the object it
+    // already has, and the next lookup creates a fresh one. Destroying them
+    // here would reintroduce exactly the window this implementation no longer
+    // has.
     void clear() noexcept {
-        // Atomic publish of nullptr, retire old snapshot for time-deferred
-        // reclamation. Readers still holding the old snapshot stay valid
-        // until the grace period elapses.
         std::lock_guard lock(m_write_mutex);
-        Snapshot* old = m_snapshot.exchange(nullptr, std::memory_order_acq_rel);
-        if (old) {
-            m_retire.push_back({old, std::chrono::steady_clock::now()});
+        for (int i = 0; i < m_capacity; ++i) {
+            m_slots[i].store(nullptr, std::memory_order_release);
         }
-        drain_expired_locked();
-    }
-
-    // Best-effort: free anything past the grace period right now. Safe to
-    // call from any thread (takes m_write_mutex). Typically not needed —
-    // the next install_slot drains automatically.
-    void reclaim_old_snapshots() {
-        std::lock_guard lock(m_write_mutex);
-        drain_expired_locked();
-    }
-
-    // Test helper: number of retired-but-not-yet-reclaimed snapshots.
-    [[nodiscard]] std::size_t retired_count() const noexcept {
-        std::lock_guard lock(m_write_mutex);
-        return m_retire.size();
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
-        auto* snap = m_snapshot.load(std::memory_order_acquire);
-        if (!snap) return 0;
         std::size_t n = 0;
-        for (auto& s : snap->slots) {
-            if (s) ++n;
+        for (int i = 0; i < m_capacity; ++i) {
+            if (m_slots[i].load(std::memory_order_acquire) != nullptr) ++n;
         }
         return n;
     }
 
-    // Fixed-size snapshot: the id *is* the index, so this is a hard
-    // capacity. HookContext::slot_for will not issue a slot beyond it.
-    static constexpr int kCapacity = static_cast<int>(SPLICE_MAX_HOOKS);
+    // The id is the index, so this is a hard bound -- but a runtime one.
+    // `HookContext::slot_for` will not issue a slot at or beyond it.
+    [[nodiscard]] int capacity() const noexcept { return m_capacity; }
+
+    // False when the array could not be allocated. The context asks both
+    // registries and refuses every registry-backed install if either says no,
+    // so a half-built bound is never exposed.
+    [[nodiscard]] bool storage_ok() const noexcept { return m_slots != nullptr; }
+
+    void release_storage() noexcept {
+        detail::free_hook_slots(m_slots);
+        m_slots = nullptr;
+        m_capacity = 0;
+    }
 
 private:
-    struct Snapshot {
-        std::array<std::shared_ptr<HookBase>, SPLICE_MAX_HOOKS> slots{};
-    };
-
     template <typename HookT>
     HookT& install_slot(int id) {
-        if (id < 0 || id >= kCapacity) {
-            // Defensive only, and deliberately not fatal any more.
-            // HookContext::slot_for refuses to issue a slot at or beyond
-            // kCapacity, so a well-formed install cannot reach this branch.
-            // It used to call std::abort(), which turned a capacity limit into
-            // a dead consumer process -- inside a game, or inside a system
-            // service. A capacity limit is expressible as a refused install,
-            // every install already returns an outcome, and that is where it
-            // is reported now. What is left here is a log and an inert slot.
+        if (m_slots == nullptr || id < 0 || id >= m_capacity) {
+            // Defensive, and deliberately not fatal. `slot_for` refuses to
+            // issue a slot outside the bound, so a well-formed install cannot
+            // arrive here; a caller passing a raw id can. It used to abort the
+            // process, which turned a capacity limit into a dead consumer --
+            // inside a game, or inside a system service.
             SPLICE_LOGE("rcu_atomic_array: hook id=%d outside [0, %d) -- "
                         "ignored. Raise SPLICE_MAX_HOOKS for a build that needs "
                         "more than %d hook sites.",
-                        id, kCapacity, kCapacity);
+                        id, m_capacity, m_capacity);
             static HookT inert;
             return inert;
         }
 
         std::lock_guard lock(m_write_mutex);
-        // Re-check inside the lock: another writer may have installed
-        // this slot while we were waiting on m_write_mutex.
-        auto* old = m_snapshot.load(std::memory_order_acquire);
-        const std::size_t idx = static_cast<std::size_t>(id);
-        if (old && old->slots[idx]) {
-            return *static_cast<HookT*>(old->slots[idx].get());
+        // Re-check inside the lock: another writer may have installed this
+        // slot while we were waiting on m_write_mutex.
+        if (auto* existing = m_slots[id].load(std::memory_order_acquire)) {
+            return *static_cast<HookT*>(existing);
         }
 
-        auto next = std::make_unique<Snapshot>();
-        if (old) next->slots = old->slots;   // copy 8 KiB (cold path, cheap)
-        next->slots[idx] = std::make_shared<HookT>();
-        HookT* result = static_cast<HookT*>(next->slots[idx].get());
-
-        Snapshot* raw = next.release();
-        m_snapshot.store(raw, std::memory_order_release);
-        if (old) {
-            m_retire.push_back({old, std::chrono::steady_clock::now()});
+        // Nothrow, because the whole point of the refusal path below is that a
+        // hook library does not end a host it is only a guest in.
+        auto* hook = new (std::nothrow) HookT();
+        if (hook == nullptr) {
+            SPLICE_LOGE("rcu_atomic_array: could not allocate the hook for "
+                        "id=%d; this hook is refused and the slot stays empty.",
+                        id);
+            static HookT inert;
+            return inert;
         }
-        drain_expired_locked();
-        return *result;
+        // Release, so a reader that acquires this pointer sees a constructed
+        // object. That ordering is what the shared_ptr was providing by
+        // accident of its own store, and it is now explicit.
+        m_slots[id].store(hook, std::memory_order_release);
+        return *hook;
     }
 
-    // Must be called with m_write_mutex held. Free retired snapshots whose
-    // retirement timestamp is older than the grace period.
-    void drain_expired_locked() noexcept {
-        const auto now = std::chrono::steady_clock::now();
-        const auto grace = std::chrono::milliseconds(kGracePeriodMs);
-        auto it = m_retire.begin();
-        while (it != m_retire.end() && (now - it->retired_at) >= grace) {
-            delete it->snap;
-            ++it;
-        }
-        m_retire.erase(m_retire.begin(), it);
-    }
-
-    struct RetireEntry {
-        Snapshot* snap;
-        std::chrono::steady_clock::time_point retired_at;
-    };
-
-    // 100 ms is 10–100× headroom over typical OS scheduler preemption
-    // quanta. Override at build time if your reader windows are longer
-    // (rare — would require a trampoline that itself blocks on I/O).
-#ifndef SPLICE_RCU_GRACE_PERIOD_MS
-#   define SPLICE_RCU_GRACE_PERIOD_MS 100
-#endif
-    static constexpr int kGracePeriodMs = SPLICE_RCU_GRACE_PERIOD_MS;
-
-    std::atomic<Snapshot*>    m_snapshot{nullptr};
-    mutable std::mutex        m_write_mutex;   // serialises writers + retire queue
-    std::vector<RetireEntry>  m_retire;        // pending reclamation
+    std::atomic<HookBase*>* m_slots = nullptr;
+    int                     m_capacity = 0;
+    mutable std::mutex      m_write_mutex;   // serialises writers only
 };
 
 // ─── OriginalsRegistry<Impl> ───────────────────────────────────────────────
@@ -567,13 +565,13 @@ private:
 //
 // Same trade-off framing as HookRegistry. shared_mutex_map keeps the
 // original unordered_map<int, void*> + shared_mutex pattern. rcu_atomic_
-// array uses a fixed-size array of std::atomic<void*>, indexed by id —
-// reader is a single acquire-load, no atomic RMW, no map find.
+// array uses an array of std::atomic<void*> indexed by id — reader is a
+// single acquire-load, no atomic RMW, no map find.
 //
-// Bound: SPLICE_MAX_HOOKS, same as HookRegistry. Out-of-range ids fall
-// through to the slow path (logged) so we never crash on programs that
-// momentarily exceed the bound during testing — but installs at such ids
-// will not propagate to the trampoline.
+// Bound: a runtime capacity, the same one the hook registry gets, read from
+// `detail::configured_capacity()` rather than baked into this class's layout.
+// Out-of-range ids are logged and ignored rather than crashing, and an install
+// at such an id does not reach the trampoline.
 template <typename Impl>
 class OriginalsRegistry;   // primary undefined
 
@@ -602,7 +600,11 @@ public:
     }
 
     // As above: an unbounded map imposes no capacity.
-    static constexpr int kCapacity = (std::numeric_limits<int>::max)();
+    [[nodiscard]] int capacity() const noexcept {
+        return (std::numeric_limits<int>::max)();
+    }
+    [[nodiscard]] bool storage_ok() const noexcept { return true; }
+    void release_storage() noexcept {}
 
 private:
     mutable std::shared_mutex          m_mutex;
@@ -612,43 +614,71 @@ private:
 template <>
 class OriginalsRegistry<registry::rcu_atomic_array> {
 public:
-    // Same capacity as the hook registry, and the same contract since
-    // 2026-10-13: out of range is logged and ignored on both sides. Before
-    // that the two disagreed -- the hooks side aborted the process and this
-    // side returned, which meant the same programming error killed a program
-    // in two different ways depending on which registry reached it first.
-    static constexpr int kCapacity = static_cast<int>(SPLICE_MAX_HOOKS);
+    // Same shape as the hook registry, for the same reason: a runtime capacity
+    // behind a pointer, so this class's layout does not depend on the
+    // configured value. It was a `std::array<std::atomic<void*>,
+    // SPLICE_MAX_HOOKS>` until 2026-10-13, which made `sizeof(HookContext)`
+    // depend on the capacity -- and made every consumer that disagreed about
+    // it read the shared instance at the wrong offsets.
+    //
+    // Out of range is logged and ignored on both sides, as it has been since
+    // the same day. Before that the two disagreed: the hooks side aborted the
+    // process and this side returned, so one programming error killed a
+    // program in two different ways depending on which registry reached it
+    // first.
+    OriginalsRegistry() noexcept
+        : m_slots(detail::allocate_original_slots(detail::configured_capacity())),
+          m_capacity(m_slots != nullptr ? detail::configured_capacity() : 0) {}
+
+    ~OriginalsRegistry() { detail::free_original_slots(m_slots); }
+
+    OriginalsRegistry(const OriginalsRegistry&) = delete;
+    OriginalsRegistry& operator=(const OriginalsRegistry&) = delete;
+    OriginalsRegistry(OriginalsRegistry&&) = delete;
+    OriginalsRegistry& operator=(OriginalsRegistry&&) = delete;
 
     void set(int id, void* p) noexcept {
-        if (id < 0 || id >= kCapacity) {
+        if (m_slots == nullptr || id < 0 || id >= m_capacity) {
             SPLICE_LOGE("rcu_atomic_array originals: id=%d outside [0, %d) -- "
                         "ignored. Raise SPLICE_MAX_HOOKS for a build that needs "
                         "more than %d hook sites.",
-                        id, kCapacity, kCapacity);
+                        id, m_capacity, m_capacity);
             return;   // the trampoline will see nullptr; the install is refused
         }
-        m_slots[static_cast<std::size_t>(id)].store(p, std::memory_order_release);
+        m_slots[id].store(p, std::memory_order_release);
     }
 
     [[nodiscard]] void* get(int id) const noexcept {
-        if (id < 0 || id >= kCapacity) return nullptr;
-        return m_slots[static_cast<std::size_t>(id)].load(std::memory_order_acquire);
+        if (m_slots == nullptr || id < 0 || id >= m_capacity) return nullptr;
+        return m_slots[id].load(std::memory_order_acquire);
     }
 
     void clear() noexcept {
-        for (auto& a : m_slots) a.store(nullptr, std::memory_order_release);
+        for (int i = 0; i < m_capacity; ++i) {
+            m_slots[i].store(nullptr, std::memory_order_release);
+        }
     }
 
     [[nodiscard]] std::size_t size() const noexcept {
         std::size_t n = 0;
-        for (auto& a : m_slots) {
-            if (a.load(std::memory_order_relaxed) != nullptr) ++n;
+        for (int i = 0; i < m_capacity; ++i) {
+            if (m_slots[i].load(std::memory_order_relaxed) != nullptr) ++n;
         }
         return n;
     }
 
+    [[nodiscard]] int capacity() const noexcept { return m_capacity; }
+    [[nodiscard]] bool storage_ok() const noexcept { return m_slots != nullptr; }
+
+    void release_storage() noexcept {
+        detail::free_original_slots(m_slots);
+        m_slots = nullptr;
+        m_capacity = 0;
+    }
+
 private:
-    std::array<std::atomic<void*>, SPLICE_MAX_HOOKS> m_slots{};
+    std::atomic<void*>* m_slots = nullptr;
+    int                 m_capacity = 0;
 };
 
 // ─── HookContext ────────────────────────────────────────────────────────────
@@ -673,8 +703,42 @@ private:
 // reset / install_all / token release).
 class HookContext {
 public:
-    HookContext() = default;
+    // What went wrong at construction, if anything. Immutable afterwards.
+    // `allocation_failed` is not a crash: the context is built, usable and
+    // empty, and every registry-backed install is refused through the path
+    // that already reports an exhausted capacity. Failing here instead would
+    // mean failing inside `default_context()`, which is noexcept and runs in
+    // someone else's process.
+    enum class InitStatus { ok, allocation_failed };
+
+    // Both slot arrays or neither. If either allocation failed, the other is
+    // released and the capacity is zero for both, so nothing is ever exposed
+    // with a half-established bound.
+    HookContext() noexcept {
+        if (!m_hook_registry.storage_ok() || !m_originals_registry.storage_ok()) {
+            m_hook_registry.release_storage();
+            m_originals_registry.release_storage();
+            m_init_status = InitStatus::allocation_failed;
+            m_slot_capacity = 0;
+            SPLICE_LOGE("splice: could not allocate the registry slots for %d "
+                        "hook sites. This context holds no hooks: every install "
+                        "that needs a registry slot is refused, and the host is "
+                        "left running.",
+                        detail::configured_capacity());
+            return;
+        }
+        const int hooks = m_hook_registry.capacity();
+        const int originals = m_originals_registry.capacity();
+        m_slot_capacity = hooks < originals ? hooks : originals;
+    }
+
     ~HookContext() = default;
+
+    // The bound a slot has to be valid in: the smaller of the two registries'
+    // capacities, because the trampoline reads one of each per call. Zero when
+    // the storage could not be allocated.
+    [[nodiscard]] int slot_capacity() const noexcept { return m_slot_capacity; }
+    [[nodiscard]] InitStatus init_status() const noexcept { return m_init_status; }
 
     HookContext(const HookContext&) = delete;
     HookContext& operator=(const HookContext&) = delete;
@@ -761,14 +825,6 @@ public:
     //
     // m_unique_id from __COUNTER__ stays as a debug-log identifier
     // (IdRegistry::register_mapping) but no longer drives registry access.
-    // The smaller of the two registries' capacities: the trampoline reads one
-    // of each per call, so a slot has to be valid in both.
-    static constexpr int kSlotCapacity =
-        HookRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
-                < OriginalsRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
-            ? HookRegistry<SPLICE_REGISTRY_IMPL>::kCapacity
-            : OriginalsRegistry<SPLICE_REGISTRY_IMPL>::kCapacity;
-
     // Returns -1 when no slot can be issued: the configured capacity is
     // exhausted, or this translation unit disagrees with the library about the
     // context's layout. Callers treat that as a refused install -- see
@@ -785,11 +841,20 @@ public:
         std::unique_lock lock(m_mutex);
         auto it = m_slot_by_trampoline.find(trampoline_ptr);
         if (it != m_slot_by_trampoline.end()) return it->second;
-        if (m_next_slot >= kSlotCapacity) {
-            SPLICE_LOGE("splice: no registry slot left -- %d hook sites are in "
-                        "use and that is the configured capacity. Rebuild with a "
-                        "larger SPLICE_MAX_HOOKS; this install is refused rather "
-                        "than guessed at.", kSlotCapacity);
+        if (m_next_slot >= m_slot_capacity) {
+            // Two conditions, one refusal, and they are not the same fact: a
+            // consumer that sees this needs to know whether to raise the
+            // capacity or to look at memory pressure.
+            if (m_init_status == InitStatus::allocation_failed) {
+                SPLICE_LOGE("splice: no registry slot can be issued -- the "
+                            "registry storage was never allocated. This install "
+                            "is refused; the host is unaffected.");
+            } else {
+                SPLICE_LOGE("splice: no registry slot left -- %d hook sites are "
+                            "in use and that is the configured capacity. Rebuild "
+                            "with a larger SPLICE_MAX_HOOKS; this install is "
+                            "refused rather than guessed at.", m_slot_capacity);
+            }
             return -1;
         }
         const int slot = m_next_slot++;
@@ -924,6 +989,8 @@ private:
     std::unordered_map<int, std::string> m_id_to_key;
     OriginalsRegistry<SPLICE_REGISTRY_IMPL> m_originals_registry;
     HookRegistry<SPLICE_REGISTRY_IMPL> m_hook_registry;
+    int m_slot_capacity = 0;
+    InitStatus m_init_status = InitStatus::ok;
     std::unordered_map<void*, int> m_slot_by_trampoline;
     int m_next_slot = 0;
     std::vector<InstallerSlot> m_installers;

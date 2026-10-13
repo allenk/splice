@@ -18,12 +18,14 @@ int sample_add1(int x) { return x + 1; }
 int sample_add2(int x) { return x + 2; }
 
 // Synthetic ids against the capacity, for the same reason as in
-// test_registry.cpp: the default registry is a fixed array of
-// SPLICE_MAX_HOOKS entries, so an id is an index. These contexts are local to
-// each test, so the values only have to be in range.
-constexpr int kIdIndependentHooks = SPLICE_MAX_HOOKS - 1;
-constexpr int kIdResetOriginals   = SPLICE_MAX_HOOKS - 2;
-constexpr int kIdResetHooks       = SPLICE_MAX_HOOKS - 3;
+// test_registry.cpp: the default registry indexes an array by id, so an id is
+// an index. These contexts are local to each test, so the values only have to
+// be in range. The capacity is read from the library rather than from a macro,
+// which is now private to the library's own build.
+const int kContextCapacity      = splice::detail::configured_capacity();
+const int kIdIndependentHooks   = kContextCapacity - 1;
+const int kIdResetOriginals     = kContextCapacity - 2;
+const int kIdResetHooks         = kContextCapacity - 3;
 
 } // namespace
 

@@ -26,6 +26,24 @@ leak:set_invoke
 leak:HookStorage
 leak:splice::HookStorage
 
+# The hook objects themselves, in the lock-free registry, since 2026-10-13.
+# That registry used to publish an immutable snapshot and free the retired one
+# after a 100 ms grace period; an external review showed the grace period
+# cannot be sound, because a reader loads the snapshot pointer and *then*
+# dereferences the array, and a thread preempted between those two steps
+# outlives any period. Reclaiming correctly needs reader registration or
+# hazard pointers, which would cost the hot path the whole reason this
+# implementation exists -- so a published hook now lives for the life of the
+# process, which is the same bargain the trampolines already make and for the
+# same missing protocol. The array of slot pointers IS freed, at teardown; what
+# stays is the hooks it pointed at.
+#
+# Matched on the registry's own installer, with get_or_create as the fallback
+# for a symbolizer that abbreviates the template frame. Everything reaching
+# either is a hook slot allocation.
+leak:install_slot
+leak:get_or_create
+
 # Diagnostic sugar (SPLICE_COUNT / SPLICE_TIME / SPLICE_TRACE) installs
 # program-lifetime observers via the same publish path.
 leak:splice::diagnostics
