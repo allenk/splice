@@ -86,6 +86,64 @@ TEST(NearAlloc, repeated_requests_each_get_their_own_block_still_in_range) {
     }
 }
 
+TEST(NearAlloc, a_crowded_neighbourhood_is_escaped_rather_than_given_up_on) {
+    // The two tests above ask whether the search found something near this
+    // binary's own code. Whether that is hard depends on how large the binary
+    // happens to be, so they sample the allocator rather than measure it: both
+    // passed for a year while the search covered a thousandth of the range it
+    // documents, and only began failing when a sanitizer build grew until the
+    // two megabytes either side of the anchor were all mapped.
+    //
+    // This one builds the crowding itself. A contiguous block is taken and the
+    // hint placed in its middle, so every page for four megabytes either side
+    // is already mapped -- by us, so nothing else is disturbed -- and the
+    // search cannot answer at all without leaving that neighbourhood. It is
+    // the same shape as the failure, with the luck taken out.
+    constexpr std::size_t kCrowd = 8u * 1024u * 1024u;
+    void* const crowd = splice::os::allocate_executable_memory(kCrowd, nullptr);
+    ASSERT_NE(crowd, nullptr);
+
+    void* const anchor = static_cast<char*>(crowd) + kCrowd / 2;
+
+    void* mem = splice::os::allocate_executable_memory(144, anchor);
+    ASSERT_NE(mem, nullptr);
+
+    const std::int64_t delta = distance(anchor, mem);
+    std::printf("[near-alloc] crowded anchor=%p block=%p delta=%lld\n",
+                anchor, mem, static_cast<long long>(delta));
+
+    // It had to come from outside the region we filled: there was no free page
+    // inside it, which is the premise of the test rather than an assertion
+    // about the allocator's taste.
+    const auto crowd_begin = reinterpret_cast<std::uintptr_t>(crowd);
+    const auto block = reinterpret_cast<std::uintptr_t>(mem);
+    EXPECT_TRUE(block < crowd_begin || block >= crowd_begin + kCrowd)
+        << "the block came from inside the region this test had mapped";
+
+    // Within the immediate neighbourhood of the region it had to escape, which
+    // is a stricter thing than "within rel32" and the reason this test is
+    // worth having.
+    //
+    // The rel32 bound alone does not discriminate here. This anchor is itself
+    // an mmap'd block rather than code in the loaded image, so the fallback
+    // path -- an OS-chosen address -- lands in the same mmap arena and comes
+    // out comfortably inside rel32: measured at 74.2 to 74.7 MB across ten
+    // runs with the search deliberately narrowed, every one of which would
+    // have passed a rel32 assertion while the search had in fact given up. The
+    // search proper answers from one page outside the region, 4.2 MB from the
+    // anchor. kCrowd sits between the two with most of an order of magnitude
+    // either side.
+    EXPECT_LT(abs64(delta), static_cast<std::int64_t>(kCrowd))
+        << "this is the fallback's answer, not the search's";
+
+    // And the contract itself, which the bound above implies but which is what
+    // the caller actually depends on.
+    EXPECT_LT(abs64(delta), static_cast<std::int64_t>(0x7FFFFFFF));
+
+    splice::os::free_executable_memory(mem, 144);
+    splice::os::free_executable_memory(crowd, kCrowd);
+}
+
 TEST(NearAlloc, a_null_hint_still_allocates) {
     // The hint is optional and every pre-existing caller omits it. A
     // regression here would break the ARM64 backend, which deliberately does

@@ -37,17 +37,33 @@ bool in_near_reach(std::uintptr_t origin, const void* mem, std::size_t size) {
     return hi - lo <= kNearReach;
 }
 
-// How many pages either side of the hint to try before giving up.
+// How far either side of the hint to search, and how finely.
 //
-// Deliberately far more modest than the Win32 search. VirtualQuery hands back
-// a whole region at a time, so that side can skip an occupied stretch in one
-// call; mmap offers no equivalent, and parsing /proc/self/maps is both
-// Linux-only and a lot of machinery for a path whose only current x86_64
-// consumer is a desktop Windows overlay. A few megabytes either side of a
-// module image is nearly always free, so the bounded probe below succeeds in
-// practice, and failing it costs correctness nothing -- only the atomic
-// install path.
-constexpr std::size_t kNearProbePages = 512;
+// Two phases, because the documented reach is kNearReach -- two gigabytes --
+// and walking that one page at a time would be half a million mmap calls. The
+// first phase walks page by page through the two megabytes either side of the
+// hint, which is where a hole next to a module image usually is and where the
+// closest block is. Past that the stride opens to kNearProbeStride and the
+// walk continues to the edge of the reach, testing one page per stride, which
+// is enough because any hole in range will do.
+//
+// The page-by-page phase used to be the whole search, so this allocator
+// covered 1/1024th of the range it documented, and the warning it logged on
+// failure named kNearReach -- a window it had never looked at. It worked for
+// as long as the caller's own image was small enough that the pages just past
+// it were free, and it began failing when a sanitizer build of this project's
+// test suite grew until all two megabytes either side of the anchor were
+// mapped. What follows a failed search is not merely a slower path: an
+// OS-chosen address lands tens of terabytes away on x86_64 Linux, which
+// forfeits the atomic install and makes any rip-relative prologue
+// unrelocatable.
+//
+// Still no /proc/self/maps gap search, which would find a hole in one read
+// instead of by probing. This file parses that file for other reasons now, so
+// the machinery objection has gone; what remains is that the probe succeeds on
+// its first attempt in the ordinary case and needs nothing Linux-specific.
+constexpr std::size_t kNearProbePages  = 512;
+constexpr std::size_t kNearProbeStride = 2u * 1024u * 1024u;
 
 } // namespace
 
@@ -76,11 +92,15 @@ void* allocate_executable_memory(std::size_t size, const void* near_addr) {
 #else
         const int near_flags = flags;
 #endif
-        for (std::size_t step = 0; step < kNearProbePages; ++step) {
+        // Stop where the block itself would no longer fit inside the reach,
+        // rather than where its first byte would: in_near_reach measures the
+        // whole span, so a candidate past this point could never be accepted.
+        const std::uintptr_t furthest =
+            kNearReach > aligned ? kNearReach - aligned : 0;
+        std::uintptr_t offset = aligned;
+        std::size_t probes = 0;
+        while (offset <= furthest) {
             for (int direction = 0; direction < 2; ++direction) {
-                if (step == 0 && direction == 1) continue;
-                const std::uintptr_t offset =
-                    aligned + static_cast<std::uintptr_t>(step) * ps;
                 if (direction == 1 && page_base < offset) continue;
                 const std::uintptr_t candidate = direction == 0
                                                      ? page_base + offset
@@ -102,11 +122,15 @@ void* allocate_executable_memory(std::size_t size, const void* near_addr) {
                 // rather than leak one we cannot use.
                 ::munmap(mem, aligned);
             }
+            offset += probes < kNearProbePages
+                          ? static_cast<std::uintptr_t>(ps)
+                          : static_cast<std::uintptr_t>(kNearProbeStride);
+            ++probes;
         }
-        SPLICE_LOGW("allocate_executable_memory: nothing free within %zu bytes "
-                    "of %p after %zu probes; falling back to an "
-                    "OS-chosen address",
-                    kNearReach, near_addr, kNearProbePages);
+        SPLICE_LOGW("allocate_executable_memory: no free page within %zu bytes "
+                    "of %p after %zu probes; falling back to an OS-chosen "
+                    "address, which forfeits the atomic install path",
+                    kNearReach, near_addr, probes);
     }
 
     void* mem = ::mmap(nullptr, aligned, prot, flags, -1, 0);
