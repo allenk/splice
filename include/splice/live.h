@@ -174,7 +174,28 @@ public:
     static constexpr std::size_t kCount = SPLICE_SLOT_STUBS_PER_SIGNATURE;
 
     // The next unclaimed stub for this signature, or nullptr when they are all
-    // in use. A claim lasts until the group that made it is disabled.
+    // spent.
+    //
+    // **A claim is permanent for the life of the process**, and that is the
+    // contract rather than an omission. A stub is a dispatch identity: the
+    // registry slot behind it, the original it publishes and the callback it
+    // finds are all keyed on this function's address. Handing the same address
+    // to a later claimant means a call that was already inside the old hook --
+    // which the disable contract in this file explicitly permits, since every
+    // disable here is a switch and not a drain -- arrives in a stub that has
+    // since published somebody else's original and callback.
+    //
+    // Deferring the reuse instead was considered and withdrawn: a timer is not
+    // a proof that no thread is inside a function, which is the same reasoning
+    // that cost this library its snapshot reclamation.
+    //
+    // So `kCount` is a budget of **spent identities per signature per policy,
+    // for the whole process**, not a limit on how many can be live at once.
+    // Eight by default. A process that installs and disables a runtime chain
+    // over the same signature nine times gets a refused install on the ninth,
+    // through the path that already reports an exhausted pool -- which is a
+    // refusal a caller can act on, and the alternative was a reused identity
+    // it could not detect.
     static void* claim() {
         void* const* table =
             stub_table<FuncType, Policy>(std::make_index_sequence<kCount>{});
@@ -189,16 +210,14 @@ public:
         return nullptr;
     }
 
-    static void release(void* stub) {
-        if (stub == nullptr) return;
-        void* const* table =
-            stub_table<FuncType, Policy>(std::make_index_sequence<kCount>{});
+    // How many identities this signature has spent. Diagnostics and tests:
+    // there is deliberately no way to give one back.
+    [[nodiscard]] static std::size_t spent() noexcept {
+        std::size_t n = 0;
         for (std::size_t i = 0; i < kCount; ++i) {
-            if (table[i] == stub) {
-                claimed()[i].store(false, std::memory_order_release);
-                return;
-            }
+            if (claimed()[i].load(std::memory_order_acquire)) ++n;
         }
+        return n;
     }
 
 private:
@@ -292,7 +311,6 @@ struct PendingSite {
     // to know either. `group_bit` is the re-entrancy scope the whole group
     // shares, applied unless this site named one of its own.
     std::function<void(void* original, std::uint64_t group_bit)> publish;
-    std::function<void()> release_stub;
 
     // Only set for a site adopted from the installer queue: the entry that
     // owns the hook has its own notion of whether it is installed, and it has
@@ -304,7 +322,6 @@ struct PendingSite {
 struct InstalledSite {
     void*                 where = nullptr;    // the slot or the target, for logging
     splice_patch_record   record{};
-    std::function<void()> release_stub;
     std::function<void(const splice_patch_record*)> settle;
 };
 
@@ -328,7 +345,30 @@ public:
     [[nodiscard]] Failure failure() const noexcept { return m_failure; }
     [[nodiscard]] bool    ok()      const noexcept { return m_state == State::installed; }
     [[nodiscard]] std::size_t installed_sites() const noexcept {
-        return m_group ? m_group->sites.size() : 0;
+        // Only an installed group has installed sites. A `lost` outcome also
+        // carries a group -- the sites it could not restore -- and counting
+        // those here would report a failure as a success.
+        return (m_state == State::installed && m_group) ? m_group->sites.size() : 0;
+    }
+
+    // What `lost` cost, in the only terms a caller can act on. A lost install
+    // left at least one function patched with no way for this library to put
+    // it back on its own; these are those sites, and `disable()` on this
+    // outcome tries them again. Zero for every other state.
+    //
+    // Before this the sites were dropped on the way out, so a caller was told
+    // it had lost something and not which thing.
+    [[nodiscard]] std::size_t unrestored_sites() const noexcept {
+        return (m_state == State::lost && m_group) ? m_group->sites.size() : 0;
+    }
+
+    // The patched address of one of them, for a caller that wants to report or
+    // log it. nullptr when the index is out of range.
+    [[nodiscard]] void* unrestored_site(std::size_t index) const noexcept {
+        if (m_state != State::lost || !m_group || index >= m_group->sites.size()) {
+            return nullptr;
+        }
+        return m_group->sites[index].where;
     }
 
     // How many threads the transaction enlisted. Reported whatever the
@@ -348,13 +388,14 @@ public:
         return m_group != nullptr && m_group->installed;
     }
 
-    // Put every site in the group back, and release the stubs the group
-    // claimed. Like every other disable in splice this is a switch and not a
-    // drain: a call already inside a callback carries on to completion.
+    // Put every site in the group back. Like every other disable in splice
+    // this is a switch and not a drain: a call already inside a callback
+    // carries on to completion -- which is exactly why the stubs are not
+    // given back here or anywhere else. A dispatch identity is spent once; see
+    // StubPool.
     //
     // Returns true when every site was restored. False means at least one is
-    // still live, and no stub is released in that case -- a stub something may
-    // still call is not free.
+    // still live, and the group keeps those sites so a caller can try again.
     bool disable() noexcept {
         if (!m_group || !m_group->installed) return false;
         bool all = true;
@@ -365,10 +406,9 @@ public:
         }
         if (!all) return false;
         for (auto& site : m_group->sites) {
-            // Before the stub goes back: an entry that still believed it was
-            // installed would restore these bytes a second time.
+            // An entry that still believed it was installed would restore
+            // these bytes a second time.
             if (site.settle) site.settle(nullptr);
-            if (site.release_stub) site.release_stub();
         }
         m_group->installed = false;
         m_group->sites.clear();
@@ -617,7 +657,7 @@ public:
                 return undo(group, pending.site, Operation::write_slot);
             }
             group->sites.push_back(detail::InstalledSite{
-                static_cast<void*>(pending.slot), record, pending.release_stub,
+                static_cast<void*>(pending.slot), record,
                 pending.settle});
         }
         return installed(group);
@@ -681,8 +721,12 @@ public:
         if (engine_outcome.state != SPLICE_LIVE_INSTALLED) {
             record_engine_failure(engine_outcome);
             if (engine_outcome.state == SPLICE_LIVE_LOST) {
-                // The stubs stay claimed: a thread may still be inside one,
-                // and on this path the threads may still be suspended.
+                // The stubs stay claimed, as they do everywhere: a thread may
+                // still be inside one, and on this path the threads may still
+                // be suspended. There are no records to carry here -- the
+                // commit is what failed -- so this outcome can say that it
+                // lost something but not which site, which is the one case
+                // `unrestored_sites()` cannot answer.
                 m_sites.clear();
                 Outcome lost_outcome(State::lost, m_failure);
                 lost_outcome.m_threads = m_threads;
@@ -701,8 +745,7 @@ public:
         for (std::size_t i = 0; i < m_sites.size(); ++i) {
             if (m_sites[i].settle) m_sites[i].settle(&records[i]);
             group->sites.push_back(detail::InstalledSite{
-                m_sites[i].target, records[i], m_sites[i].release_stub,
-                m_sites[i].settle});
+                m_sites[i].target, records[i], m_sites[i].settle});
         }
         return installed(group);
     }
@@ -783,6 +826,9 @@ public:
             SPLICE_LOGE("splice: no stub left for this signature (%d in use); "
                         "raise SPLICE_SLOT_STUBS_PER_SIGNATURE",
                         static_cast<int>(detail::StubPool<FuncType, Policy>::kCount));
+            // Spent, not busy: see StubPool. Raising
+            // SPLICE_SLOT_STUBS_PER_SIGNATURE raises the process's budget for
+            // this signature, and nothing frees one.
             fail(Stage::prepare, Operation::none, 0, site);
             return;
         }
@@ -804,7 +850,10 @@ public:
                             "cannot resolve",
                             site.ordinal);
             }
-            detail::StubPool<FuncType, Policy>::release(stub);
+            // The stub stays claimed. A refused site has still spent its
+            // identity, because nothing can prove no thread ever reached that
+            // address -- the same rule as everywhere else, stated here because
+            // this is the one path where giving it back would look free.
             fail(Stage::prepare, Operation::none, 0, site);
             return;
         }
@@ -818,9 +867,6 @@ public:
         pending.expected = expected;
         pending.expect_set = expect_set;
         pending.expected_prologue = expected_prologue;
-        pending.release_stub = [stub]() {
-            detail::StubPool<FuncType, Policy>::release(stub);
-        };
         pending.publish = [slot_id = pending.registry_slot, gates = std::move(gates),
                            fn = std::move(fn),
                            needs_original](void* original,
@@ -921,28 +967,39 @@ private:
             release_pending();
             return Outcome(State::refused, m_failure);
         }
-        bool all = true;
+        // Restored sites are dropped; the ones this could not put back stay,
+        // because "lost" without saying what was lost leaves a caller holding
+        // a patched function it cannot name. They also stay disable-able: the
+        // group keeps `installed` set while any remain, so a caller can try
+        // again once whatever blocked the restore has passed.
+        std::vector<detail::InstalledSite> unrestored;
         for (auto& written : group->sites) {
             if (splice_disable(&written.record) != 0) {
-                all = false;
-                SPLICE_LOGE("splice: could not restore %p after failing at site %zu",
+                SPLICE_LOGE("splice: could not restore %p after failing at site "
+                            "%zu -- it is still patched, and the outcome carries "
+                            "it so the caller can see that and retry",
                             written.where, site.ordinal);
+                unrestored.push_back(std::move(written));
                 continue;
             }
-            if (written.release_stub) written.release_stub();
         }
-        group->sites.clear();
+        const bool all = unrestored.empty();
+        group->sites = std::move(unrestored);
+        group->installed = !all;
         release_pending();
-        return Outcome(all ? State::recovered : State::lost, m_failure);
+        if (all) return Outcome(State::recovered, m_failure);
+        Outcome lost(State::lost, m_failure);
+        lost.m_group = std::move(group);
+        return lost;
     }
 
-    // Stubs claimed by sites that never got installed go back to the pool.
-    void release_pending() {
-        for (auto& pending : m_sites) {
-            if (pending.release_stub) pending.release_stub();
-        }
-        m_sites.clear();
-    }
+    // Drops the pending sites. Their stubs are **not** reclaimed: a claim is
+    // permanent for the process, so a site that was prepared and never
+    // installed has still spent its identity. That is the cost of the
+    // guarantee that no identity is ever handed out twice, and it is the
+    // reason the budget is documented as spent identities rather than as a
+    // concurrency limit. See StubPool.
+    void release_pending() { m_sites.clear(); }
 
     void record_engine_failure(const splice_live_outcome& outcome) {
         fail(stage_of(outcome), operation_of(outcome), outcome.os_error,

@@ -346,13 +346,24 @@ TEST_F(VtableGroup, a_null_object_refuses_instead_of_reading_through_it) {
     EXPECT_EQ(outcome.failure().stage, splice::Stage::prepare);
 }
 
-TEST_F(VtableGroup, the_stub_pool_is_finite_and_a_released_stub_can_be_claimed_again) {
+TEST_F(VtableGroup, a_dispatch_identity_is_spent_once_and_never_reissued) {
     ICalculator* calc = splice::test::calculator();
     constexpr int kPool = SPLICE_SLOT_STUBS_PER_SIGNATURE;
 
-    // One signature, one stub each: int(ICalculator*, int). Claim every stub
-    // the pool has, each in its own group on the same slot -- which is legal,
-    // the last one written wins, and all of them are undone below.
+    // This test asserted the opposite until 2026-10-13: that a disabled group
+    // gives its stub back and the next claim succeeds. That is the defect. A
+    // stub is a dispatch identity -- the registry slot, the original and the
+    // callback behind it are all keyed on that function's address -- and every
+    // disable in this library is a switch rather than a drain, so a call
+    // already inside the old callback can still arrive at it. Handing the
+    // address to a later claimant points that call at somebody else's original.
+    //
+    // So the budget is spent identities for the life of the process, and what
+    // this asserts now is that spending is one-way.
+
+    // One signature, one stub each: int(ICalculator*, int). Claim every
+    // identity the pool has, each in its own group on the same slot -- which
+    // is legal, the last one written wins, and all of them are undone below.
     std::vector<splice::Outcome> groups;
     for (int i = 0; i < kPool; ++i) {
         groups.push_back(splice::Vtable<ICalculator>{calc}
@@ -363,7 +374,9 @@ TEST_F(VtableGroup, the_stub_pool_is_finite_and_a_released_stub_can_be_claimed_a
         ASSERT_EQ(groups.back().state(), splice::State::installed) << "at claim " << i;
     }
 
-    // The next claim has nothing left to hand out, so the group refuses.
+    // The next claim has nothing left to hand out, so the group refuses --
+    // which is a refusal the caller can act on, and the alternative was a
+    // reused identity it could not detect.
     splice::Outcome exhausted = splice::Vtable<ICalculator>{calc}
         .on(&ICalculator::scale, [](auto orig, ICalculator* self, int value) {
             return orig(self, value);
@@ -371,19 +384,20 @@ TEST_F(VtableGroup, the_stub_pool_is_finite_and_a_released_stub_can_be_claimed_a
         .install(splice::slot_swap);
     EXPECT_EQ(exhausted.state(), splice::State::refused);
 
-    // Give them back in reverse, so each disable restores what the one before
-    // it had seen, and the slot ends up holding the provider's own function.
+    // Undo them in reverse, so each disable restores what the one before it
+    // had seen and the slot ends up holding the provider's own function.
     for (auto it = groups.rbegin(); it != groups.rend(); ++it) {
         EXPECT_TRUE(it->disable());
     }
     EXPECT_EQ(calc->scale(5), 15);
 
-    // And now a claim succeeds again.
+    // And a claim still fails, because disabling a group does not give its
+    // identity back. This is the assertion that replaced the old one.
     splice::Outcome after = splice::Vtable<ICalculator>{calc}
         .on(&ICalculator::scale, [](auto orig, ICalculator* self, int value) {
             return orig(self, value);
         })
         .install(splice::slot_swap);
-    EXPECT_EQ(after.state(), splice::State::installed);
-    EXPECT_TRUE(after.disable());
+    EXPECT_EQ(after.state(), splice::State::refused)
+        << "a disabled group's dispatch identity must not be reissued";
 }
