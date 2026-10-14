@@ -299,6 +299,183 @@ needs an architecture whose prologue can be planned and an OS that can suspend a
 thread, which today means x86_64 on Windows. `slot_swap` has no such
 requirement.
 
+## The lock-free registry — what every hooked call pays
+
+Every hooked call makes two registry lookups: one to find your callback, one to
+find the original function. Since 1.2.0 each is a **single acquire-load from a
+flat array**, and that is the whole lookup:
+
+```cpp
+auto* hook = slots[id].load(std::memory_order_acquire);   // no lock, no RMW
+```
+
+No mutex, no reference count, no atomic read-modify-write, nothing to reclaim.
+The id *is* the index — `slot_for(trampoline)` hands out one slot per hook site,
+so the array is indexed and never searched. The line a reader touches is one
+nobody writes, so it stays Shared in every core's cache and a hooked call
+generates no coherence traffic at all. That is why the contended numbers below
+are nearly flat.
+
+This is `splice::registry::rcu_atomic_array`, the default. The previous default,
+`shared_mutex_map`, took a `shared_lock` and hashed the id — twice per call —
+and cost about **91% of all single-thread dispatch**. It is still supported; the
+trade is set out further down.
+
+### Measured, on three boards
+
+One commit, the registry as the only difference between two binaries, both
+built before anything was measured, Release, callback dispatch in ns/call.
+x86_64 and Android use this repository's own Google Benchmark binaries, so those
+two are comparable line for line; the Jetson has no Google Benchmark installed
+and uses a standalone harness of the same shape.
+
+**An unhooked call is measured inside every binary** as an in-run control, and
+that is not ceremony. A standalone harness on a governor-driven phone reported
+the same unhooked call at 3.67 ns under one thread and 1.36 under four —
+identical code apparently faster under load — while Google Benchmark held that
+control at 2.73 ns every round. Only the control catches it. It is also what
+vouches for the Jetson's harness below, where it holds at 3.32 ns across every
+thread count.
+
+**Windows x86_64 — Ryzen 9 9950X3D**, VS2022, three interleaved rounds on a
+settled machine, medians:
+
+| | unhooked | `rcu_atomic_array` | `shared_mutex_map` |
+|---|---|---|---|
+| 1 thread | 2.37 | **4.3** | 23.3 |
+| 8 threads | — | **19** | ~1400 |
+| 8t/1t | — | **4.5×** | ~60× |
+
+**Android ARM64 — Snapdragon 8 Gen 3 / Android 14**, NDK clang, on device,
+three rounds (ranges are the spread across them):
+
+| threads | unhooked | `rcu_atomic_array` | `shared_mutex_map` |
+|---|---|---|---|
+| 1 | 2.73 | **4.55–4.72** | 72.6–75.7 |
+| 2 | — | 5.13–5.33 | 320–393 |
+| 4 | — | 5.83–6.10 | 791–818 |
+| 8 | — | **7.88–7.91** | 1774–1822 |
+
+Splice adds **1.9 ns** over an unhooked call here — the same 1.9 ns as on the
+9950X3D, so there is no residual ARM64 dispatch penalty once the lock is gone.
+What is genuinely dearer on ARM64 is the lock itself, and the registry gap
+widens to **228× at eight threads**.
+
+**Linux ARM64 — Jetson Orin Nano** (6-core Cortex-A78AE, 15 W), gcc 13.3, built
+and run natively on the board:
+
+| threads | unhooked | `rcu_atomic_array` | `shared_mutex_map` |
+|---|---|---|---|
+| 1 | 3.32 | **11.95** | 100.8 |
+| 2 | 3.33 | 11.97 | 1055.5 |
+| 4 | 3.32 | 11.96 | 1950.8 |
+| 6 | 3.32 | **11.97** | 2994.7 |
+
+The lock-free path's six-thread cost **equals its one-thread cost** — a 6t/1t
+ratio of 1.00× — while the locked map reaches 250× the lock-free figure and
+costs 100 ns at one thread with nothing to contend with. This is the
+acquire-load-on-a-Shared-line property in the cleanest form of any board here.
+It is six threads on a six-core board, so it is *not* the eight-thread scaling
+gate below; the eight-thread run was never made here.
+
+**The registry on its own**, driven directly with the trampoline out of the
+picture (`benchmark/bench_registry_lookup.cpp` instantiates both
+implementations in one binary, so these never depended on a build flag):
+
+| lookup, 1 → 8 threads | `rcu_atomic_array` | `shared_mutex_map` |
+|---|---|---|
+| callbacks, x86_64 | 0.96 → 5.24 | 10.1 → 522 |
+| originals, x86_64 | 1.29 → 5.09 | 9.79 → 473 |
+| callbacks, Snapdragon 8 Gen 3 | 3.35 → 3.86 | 36.8 → 967 |
+| originals, Snapdragon 8 Gen 3 | 0.306 → 0.411 | 37.6 → 938 |
+
+Both long-standing performance gates are met for the first time: under 20 ns
+single-thread on all three boards, and 8t/1t under 5× on the two where eight
+threads were run (4.5× on x86_64, 1.7× on the Snapdragon). Protocol, raw
+rounds, and the measurement mistakes caught along the way, are in
+[`docs/fr-010-step6-bench-results.md`](docs/fr-010-step6-bench-results.md).
+
+### What it costs: a fixed footprint
+
+Two arrays, allocated once when the context is constructed and sized by the
+configured capacity — one pointer per slot for the callbacks, one per slot for
+the originals. At the default 512 on a 64-bit target that is **4 KiB each,
+8 KiB together**, and you pay all of it to install one hook. The locked map
+allocates per entry instead and starts at nothing, so a program with three
+hooks is about 8 KiB heavier under the default than it was under 1.1.0. The
+figure is deliberate: both arrays stay comfortably L1d-resident, which is what
+keeps the reader at an acquire-load.
+
+**Nothing is reclaimed.** A hook object lives for the life of the process, and
+so does the array. There *was* a reclamation scheme — publish an immutable
+snapshot, free the retired one 100 ms later — and 1.2.0 removed it, because
+elapsed time is not quiescence: a reader loads the slot pointer and *then*
+dereferences it, and a thread preempted between those two steps, or stopped in
+a debugger, or descheduled on a loaded phone, outlives any grace period.
+Reclaiming correctly needs reader registration or hazard pointers, which costs
+the hot path the entire reason this implementation exists. So it leaks, on
+purpose, at the specific sites named in `.lsan-suppressions.txt` — the same
+bargain the trampolines and the published callbacks already make here, said
+plainly rather than hidden. `clear()` detaches slots without destroying what
+was published, for the same reason.
+
+### What it costs: a hard capacity
+
+The id is an array index, so there are `SPLICE_MAX_HOOKS` slots and no more —
+**512 by default**, counted in *distinct hook sites in the process*, not in id
+values and not in calls. Slots are issued in order and never recycled, so a
+site that is installed and later disabled keeps its slot for the life of the
+process.
+
+Asking for one site past the capacity is a **refused install**: no slot is
+issued, the reason is logged with the capacity in it, and nothing is written.
+It used to `abort()` on the callback side and silently return a null original
+on the other. There is no `abort()` left anywhere in the library — it is loaded
+into somebody else's program, where that is a dead host, and on Windows a modal
+runtime dialog that freezes the host and waits for a human. If the two
+allocations fail outright at startup, the context comes up empty with a
+capacity of zero and every registry-backed install is refused by name, host
+still running.
+
+Raise it at build time:
+
+```bash
+cmake -DSPLICE_MAX_HOOKS=4096     # 32 KiB per array; the readers leave L1d
+```
+
+That option is **private to Splice's own build**, which is the design and not
+an oversight: since 1.2.0 the arrays live behind a pointer and a runtime count,
+so nothing a consumer can see — no layout, no inline expression, no template
+argument — depends on the value. A consumer compiled with a different one has
+nothing it could misread, and so does not need to be told. Ask
+`splice::detail::configured_capacity()` for what the library was built with.
+
+### When to choose the locked map instead
+
+```bash
+cmake -DSPLICE_REGISTRY_IMPL=::splice::registry::shared_mutex_map
+```
+
+Two reasons, and they are the only two:
+
+- **More hook sites than you want to bound.** A map takes any id, so there is
+  no capacity to exceed and no array to size.
+- **Hook objects you need reclaimed.** The map holds each one in a
+  `shared_ptr`, so replacing or clearing an entry frees it.
+
+Everything else is worse: about 5× the single-thread dispatch cost on x86_64,
+16× on a Snapdragon 8 Gen 3, and an 8t/1t ratio that measures the cache line
+under a `shared_mutex`'s reader counter rather than anything your code does.
+
+Unlike the capacity, **this one is a choice for the whole program.** It changes
+`sizeof(HookContext)`, and the compiled library owns the single instance every
+translation unit shares, so it is applied PUBLIC on the `splice` target and
+travels with `splice::splice`, including through `install(EXPORT)` — link the
+target and you cannot disagree. Setting the macro by hand still can: Splice
+compares the two sizes at first use, logs the mismatch, and **refuses every
+hook from the translation unit that disagrees** rather than reading the shared
+context at offsets that are not where that unit believes they are.
+
 ## New in 1.2.0
 
 **Grouped, coordinated installation** — `splice::Vtable`, `splice::Live`,
@@ -321,23 +498,14 @@ Three samples against sixteen, different games and targets, and the older
 samples span several branch states — so this is a mechanism confirmed, not a
 controlled A/B.
 
-**The lock-free registry is now the default.** Measured on one commit with the
-registry as the only difference, Release, callback dispatch in ns/call, with an
-unhooked call as an in-run control:
-
-| | unhooked | hooked, lock-free | hooked, locked |
-|---|---|---|---|
-| Ryzen 9 9950X3D | 2.37 | **4.3** | 23.3 |
-| Snapdragon 8 Gen 3 / Android 14 | 2.73 | **4.6** | 71.9–75.5 |
-| Jetson Orin Nano (Cortex-A78AE, 15 W) | 3.32 | **11.95** | 100.8 |
-
-Contended, per thread: 9950X3D 8 threads **19** against about 1400; Snapdragon
-8 threads **7.9** against 1800; Jetson 6 threads **11.97** against 2995 — where
-the lock-free path's 6-thread cost equals its 1-thread cost, because an
-acquire-load on a line nobody writes generates no coherence traffic. Both
-long-standing performance gates (< 20 ns single-thread, < 5× 8t/1t) are met for
-the first time. `shared_mutex_map` remains supported for an unbounded registry
-or immediate writer visibility.
+**The lock-free registry is now the default**, which is the largest
+performance change in this library's history: single-thread callback
+dispatch is 4.3 ns against 23.3 on x86_64 and 4.6 against 71.9 on a
+Snapdragon 8 Gen 3, because the locked map it replaces was about 91% of all
+single-thread dispatch cost. Every board, both scaling gates, the footprint
+it costs and the capacity it imposes are in
+[The lock-free registry](#the-lock-free-registry--what-every-hooked-call-pays)
+above.
 
 **Also in this release:**
 
@@ -352,10 +520,12 @@ or immediate writer visibility.
   slot's page may be read-only, writable or on the heap, so that path records
   the protection it found and puts that one back.
 - `SPLICE_REGISTRY_IMPL` and `SPLICE_MAX_HOOKS` are real CMake cache options,
-  validated at configure time and applied PUBLIC so they travel with
-  `splice::splice` and through `install(EXPORT)`. A build whose translation
-  units disagree about either is detected and refused instead of reading the
-  shared context at the wrong offsets.
+  validated at configure time. The registry choice is applied PUBLIC, so it
+  travels with `splice::splice` and through `install(EXPORT)`, and a build whose
+  translation units disagree about it is detected and refused instead of reading
+  the shared context at the wrong offsets. The capacity is PRIVATE to Splice's
+  own build, because the slot arrays now live behind a pointer and a runtime
+  count: a consumer that disagrees about it has nothing it could misread.
 - Exceeding the registry capacity is a **refused install** with the reason
   logged. It used to end the process with `abort()` on one side and return
   silently on the other. There is no `abort()` left anywhere in the library: it

@@ -37,14 +37,21 @@
 // PUBLIC compile definition and carried into the installed interface, so the
 // library and every consumer of `splice::splice` compile against one value.
 // This matters more than it looks: the choice changes `sizeof(HookContext)`
-// (408 bytes against 4472 on x86_64), and `src/context.cpp` owns the single
-// instance of that class which every translation unit shares. A consumer that
-// set the macro by hand while the library was built the other way would read
-// that instance's members at the wrong offsets -- no diagnostic, no crash
-// until a function pointer read out of the originals table is called. Splice
-// now checks for that at first use and refuses to continue
-// (`detail::assert_context_layout`), but the reason the check exists is that
+// -- 384 bytes against 416, measured with MSVC x64 and the release CRT, and a
+// different pair under another standard library but never the same number --
+// and `src/context.cpp` owns the single instance of that class which every
+// translation unit shares. A consumer that set the macro by hand while the
+// library was built the other way would read that instance's members at the
+// wrong offsets -- no diagnostic, no crash until a function pointer read out
+// of the originals table is called. Splice checks for that at first use and
+// refuses every hook from the translation unit that disagrees
+// (`detail::context_layout_agrees`), but the reason the check exists is that
 // the build should never be able to disagree in the first place.
+//
+// The capacity is no longer part of that size. Until 2026-10-13 both slot
+// arrays were members and this figure was 4472 bytes; they are a pointer and a
+// runtime count now, which is why the lock-free context is the smaller of the
+// two and why SPLICE_MAX_HOOKS no longer appears here at all.
 //
 // Until 2026-10-13 this header documented `cmake -D...` for a variable nothing
 // in the build system read, so the flag silently did nothing and the lock-free
@@ -73,9 +80,13 @@ struct rcu_atomic_array {};
 // the locked map was about 91% of all single-thread dispatch cost. It is also
 // what makes FR-010's two gates reachable (< 20 ns, and 8t/1t < 5x).
 //
-// `shared_mutex_map` remains supported and is the escape hatch now: an
-// unbounded map, no reclamation, immediate visibility, at the cost above. The
-// CMake option sets this; a build with no CMake in sight gets this default.
+// `shared_mutex_map` remains supported and is the escape hatch now, for the
+// two things it still does better at the cost above: it takes any id, so there
+// is no capacity to exceed, and it holds each hook in a shared_ptr, so
+// replacing or clearing an entry frees it. Writer visibility is not one of
+// them any more -- with the snapshot gone, a release store is as prompt as the
+// lock was. The CMake option sets this; a build with no CMake in sight gets
+// this default.
 #ifndef SPLICE_REGISTRY_IMPL
 #   define SPLICE_REGISTRY_IMPL ::splice::registry::rcu_atomic_array
 #endif

@@ -440,8 +440,13 @@ board and its protocol.
 | 8t/1t | **4.5x** | ~60x |
 
 The locked map was the default until 2026-10-13 and cost about **91% of all
-single-thread dispatch**. It is kept as the escape hatch: unbounded, no
-reclamation, immediate visibility.
+single-thread dispatch**. It is kept as the escape hatch, for the two things it
+still does better: it takes any id, so there is no capacity to exceed, and it
+holds each hook in a `shared_ptr`, so replacing or clearing an entry frees it.
+The lock-free array reclaims nothing -- see the README's
+[lock-free registry](../README.md#the-lock-free-registry--what-every-hooked-call-pays)
+section for the footprint that buys, and why no grace period can make it safe
+to free.
 
 Switch at build time, and note that this is one choice for the whole program:
 
