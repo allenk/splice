@@ -67,6 +67,50 @@ alignas(16) unsigned char g_interior_boundary[] = {
     0xC3,
 };
 
+// The shape a Windows Direct3D 12 runtime began emitting for
+// `ID3D12CommandQueue::Signal` in late 2026, with `int3` filler in front of it
+// as the compiler aligns the next function. Written out rather than described
+// because it is the case the padding field exists for: a three-byte entry, so
+// a five-byte patch needs two instructions and the second one starts inside
+// the window, while a two-byte entry jump would need somewhere to jump to.
+//
+// Page aligned so the entry's offset within its page is exactly the filler
+// length. The count is clamped to the entry's own page, so an unaligned
+// fixture could land near a page start and report fewer bytes than it holds --
+// a test that is right most of the time is the kind this suite has been bitten
+// by before.
+alignas(4096) unsigned char g_filler_then_short_entry[] = {
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,   // sixteen bytes of filler
+    0x48, 0x8B, 0xC4,                                  // mov rax, rsp
+    0x48, 0x89, 0x58, 0x10,                            // mov [rax+10h], rbx
+    0xC3,                                              // ret
+};
+constexpr std::size_t kShortEntryFiller = 16;
+
+// Same entry, filler that is `nop` instead. A `nop` run can be fallen into, so
+// a thread can be standing in one and nothing may be written there.
+alignas(4096) unsigned char g_nop_filler_then_entry[] = {
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x48, 0x8B, 0xC4,
+    0x48, 0x89, 0x58, 0x10,
+    0xC3,
+};
+
+// More filler than the profile will count, so the cap is pinned by a test
+// rather than left to be discovered by a consumer reading a surprising number.
+alignas(4096) unsigned char g_filler_past_the_cap[] = {
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,   // forty bytes
+    0xB8, 0x44, 0x33, 0x22, 0x11,
+    0xC3,
+};
+constexpr unsigned int kPaddingCap = 32;
+
 } // namespace
 
 TEST(PrologueFacts, a_five_byte_entry_has_no_interior_boundary) {
@@ -88,6 +132,42 @@ TEST(PrologueFacts, a_short_entry_puts_a_boundary_inside_the_window) {
         << "the second instruction starts at offset 3, inside the window";
     EXPECT_EQ(facts.interior_mask, 1u << 3)
         << "and the mask has to say where, not just how many";
+}
+
+TEST(PrologueFacts, the_runtime_shape_that_straddles_a_boundary_still_has_room_in_front) {
+    // Both halves of the same fixture, because they are the two halves of one
+    // decision: the window straddles a boundary, and there is filler in front
+    // of it that a shorter entry jump could be answered from.
+    splice_prologue_facts facts{};
+    ASSERT_EQ(splice_prologue_profile(g_filler_then_short_entry + kShortEntryFiller, &facts), 0);
+    EXPECT_EQ(facts.first_instruction, 3u) << "mov rax, rsp";
+    EXPECT_EQ(facts.patch_bytes, 7u) << "three plus four, rounded up to whole instructions";
+    EXPECT_EQ(facts.interior_boundaries, 1u);
+    EXPECT_EQ(facts.interior_mask, 1u << 3)
+        << "a thread can be stopped between the two instructions, and that is the offset";
+    EXPECT_EQ(facts.entry_padding, static_cast<unsigned int>(kShortEntryFiller))
+        << "the filler in front is what a two-byte entry jump would need";
+    EXPECT_GE(facts.first_instruction, 2u)
+        << "and the first instruction has room for a two-byte jump inside it";
+}
+
+TEST(PrologueFacts, nop_filler_is_not_reported_as_room) {
+    // The distinction the field exists to make. A `nop` run is executable and
+    // can be fallen into, so a thread can be standing in one; an `int3` traps,
+    // so no correct path is ever inside it. Reporting them the same would
+    // invite a write into bytes somebody is running.
+    splice_prologue_facts facts{};
+    ASSERT_EQ(splice_prologue_profile(g_nop_filler_then_entry + kShortEntryFiller, &facts), 0);
+    EXPECT_EQ(facts.first_instruction, 3u) << "the same entry as the fixture above";
+    EXPECT_EQ(facts.entry_padding, 0u) << "nop is not room, however much of it there is";
+}
+
+TEST(PrologueFacts, the_reported_room_is_capped) {
+    splice_prologue_facts facts{};
+    ASSERT_EQ(splice_prologue_profile(g_filler_past_the_cap + 40, &facts), 0);
+    EXPECT_EQ(facts.first_instruction, 5u);
+    EXPECT_EQ(facts.entry_padding, kPaddingCap)
+        << "forty bytes of filler, counted up to the cap and no further";
 }
 
 TEST(PrologueFacts, the_window_is_always_whole_instructions_and_covers_the_patch) {

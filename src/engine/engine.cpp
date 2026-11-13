@@ -578,13 +578,30 @@ int splice_prologue_profile(const void* target, splice_prologue_facts* out) {
         }
     }
 
+    // Filler before the entry. Walked backwards from the entry and stopped at
+    // the entry's own page, so a function that begins a page reports none
+    // rather than reading the page before it -- which may belong to another
+    // module, or to nothing at all.
+    constexpr std::size_t kPaddingCap = 32;
+    const auto entry = reinterpret_cast<std::uintptr_t>(resolved);
+    const std::size_t in_page = static_cast<std::size_t>(entry % splice::os::page_size());
+    const std::size_t reach = in_page < kPaddingCap ? in_page : kPaddingCap;
+    unsigned int padding = 0;
+    if (reach > 0 && splice::os::is_readable(bytes - reach, reach)) {
+        while (padding < reach &&
+               bytes[-static_cast<std::ptrdiff_t>(padding) - 1] == 0xCC) {
+            ++padding;
+        }
+    }
+
     out->patch_bytes = static_cast<unsigned int>(patch);
     out->first_instruction = first.length;
     out->interior_boundaries = interior;
     out->interior_mask = mask;
-    SPLICE_LOGV("splice_prologue_profile: %p patch=%u first=%u interior=%u mask=0x%x",
+    out->entry_padding = padding;
+    SPLICE_LOGV("splice_prologue_profile: %p patch=%u first=%u interior=%u mask=0x%x pad=%u",
                 resolved, out->patch_bytes, out->first_instruction,
-                out->interior_boundaries, out->interior_mask);
+                out->interior_boundaries, out->interior_mask, out->entry_padding);
     return 0;
 #else
     SPLICE_LOGW_ONCE("splice_prologue_profile: no prologue decoder on this architecture");

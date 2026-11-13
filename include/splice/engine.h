@@ -191,6 +191,25 @@ typedef struct {
     // what gets written into a refusal's evidence, and a consumer that had
     // both before should not lose one of them to a nicer API.
     unsigned int interior_mask;
+    // Bytes of `int3` filler immediately before the entry, counted backwards
+    // and capped. Only `int3` is counted, and the distinction is the whole
+    // point: a `nop` run can be fallen into, so a thread can be standing in
+    // one, while an `int3` traps -- no correct execution path is ever inside
+    // it. That makes such a run the one place near a function where bytes can
+    // be written without coordinating with anybody.
+    //
+    // Why a consumer would want it: a patch long enough to need two
+    // instructions has to displace both, and then a thread can be stopped
+    // between them. A five-byte jump parked in the filler, reached by a short
+    // jump at the entry, displaces only the first instruction instead -- so a
+    // window that would otherwise straddle a boundary stops straddling one.
+    // This library does not yet install that way; it reports whether the room
+    // is there, which is the fact the question needs either way.
+    //
+    // Counted within the entry's own page only. Filler that begins in the
+    // previous page reads as absent, which understates the room rather than
+    // reaching into memory the caller did not ask about.
+    unsigned int entry_padding;
 } splice_prologue_facts;
 
 // Fills `out` and returns 0 when the prologue at `target` decodes; returns -1
@@ -205,6 +224,12 @@ typedef struct {
 // actually be written: a relay is allocated beside every target, so the
 // jump's destination is always within rel32 and the fourteen-byte absolute
 // form does not arise.
+//
+// Every field of `*out` is written on success, so `out` must be a struct of
+// the size this header declares. The struct gained a field after version
+// 1.2.0: a caller built against the older header and linked against a newer
+// library hands over a shorter object than is written, which is why the
+// header and the library are pinned and built together.
 int splice_prologue_profile(const void* target, splice_prologue_facts* out);
 
 // Resolve a library symbol to its address, and nothing else.
