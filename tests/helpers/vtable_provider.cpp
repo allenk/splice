@@ -95,4 +95,16 @@ void* table_entry(int slot_index) {
     return table[slot_index];
 }
 
+// The address of the slot rather than its contents, for the tests that name a
+// slot directly instead of handing splice an object to read it out of. Done
+// here for the same reason `table_entry` is: a test that computes the address
+// it is checking has only proved that two copies of the same arithmetic agree.
+void** table_slot(int slot_index) {
+    if (slot_index < 0) return nullptr;
+    void** table = nullptr;
+    void* object = static_cast<void*>(&first());
+    std::memcpy(&table, object, sizeof(table));
+    return table + slot_index;
+}
+
 } // namespace splice::test

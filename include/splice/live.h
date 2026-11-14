@@ -20,14 +20,23 @@
 //          .at(signal_addr,  Signal_t{},  signal_cb)
 //          .install(splice::live);
 //
+// And a group can name the vtable slot itself, for a caller that has the table
+// but no instance to read it from -- one that resolved the slot in another
+// process and translated the address, say:
+//
+//     group.at_slot(signal_slot, Signal_t{})
+//          .expect(signal_addr)              // the second, independent fact
+//          .replace_with(&Signal, original);
+//
 // Two tiers, named honestly, because they are not interchangeable:
 //
 //   splice::slot_swap  store a pointer into the vtable slot. Needs no thread
 //                      coordination -- it is one pointer-sized atomic write.
 //                      Reaches that vtable, and another overlay swapping the
-//                      same slot displaces us or we displace it. There is no
-//                      slot to swap for a plain address, so a group named that
-//                      way refuses this tier.
+//                      same slot displaces us or we displace it. A site named
+//                      by a plain address has no slot to swap, so a group
+//                      holding one refuses this tier -- naming the slot is
+//                      what `Vtable` and `at_slot` both do.
 //   splice::live       inline-patch the function the slot points at. Survives
 //                      other overlays' slot swaps, because every existing slot
 //                      pointer stays valid and the call still arrives. Needs
@@ -1121,14 +1130,23 @@ private:
     }
 
     // Read what the site's slot holds, and check it against `.expect`.
+    //
+    // Both messages carry the slot's address as well as its index, because a
+    // slot named by `at_slot` has no index -- it reports -1, and "slot -1 is
+    // empty" names nothing a caller can go and look at. The address is the
+    // one thing every form of naming has.
     bool read_slot(const detail::PendingSite& pending, void*& value) {
         value = *pending.slot;
         if (value == nullptr) {
-            SPLICE_LOGE("splice: slot %d is empty", pending.site.slot_index);
+            SPLICE_LOGE("splice: the slot at %p (index %d) is empty",
+                        static_cast<void*>(pending.slot),
+                        pending.site.slot_index);
             return false;
         }
         if (pending.expect_set && value != pending.expected) {
-            SPLICE_LOGE("splice: slot %d holds %p, not the expected %p",
+            SPLICE_LOGE("splice: the slot at %p (index %d) holds %p, not the "
+                        "expected %p",
+                        static_cast<void*>(pending.slot),
                         pending.site.slot_index, value, pending.expected);
             return false;
         }
@@ -1335,6 +1353,36 @@ public:
     template <typename FuncType, typename Fn>
     Live& at(void* target, FuncType tag, Fn fn) {
         return at(target, tag).onInvoke(std::move(fn));
+    }
+
+    // Name the slot itself, when the table is in hand but no object is.
+    //
+    // `Vtable` reads the table out of an instance, which is the ordinary case
+    // and the one that needs no arithmetic. It is not the only case: a caller
+    // that learned the slot's address some other way -- resolved it in another
+    // process and translated it, or computed it from a table base and an index
+    // the ABI fixes -- has the slot and no object to read it from, and may be
+    // installing before any instance exists.
+    //
+    // `slot` points at the pointer, not at the function: `table + index`, not
+    // `table[index]`. Both tiers accept it. `slot_swap` stores into it;
+    // `live` reads it to find the function and patches that instead, which is
+    // the same thing `Vtable` does on that tier.
+    //
+    // Pair it with `.expect(address)`. Nothing here can tell whether the slot
+    // address is right -- it is the caller's arithmetic over the caller's
+    // evidence -- and a wrong one would be a pointer-sized write to somewhere
+    // it had no business being. `.expect` turns that into a comparison
+    // against a second, independently obtained fact: the function the caller
+    // believes the slot holds. Agreeing is not proof, and disagreeing is a
+    // refusal with nothing written.
+    template <typename FuncType>
+    GroupSite<Live, FuncType> at_slot(void** slot, FuncType) {
+        return GroupSite<Live, FuncType>(*this, slot, nullptr, -1);
+    }
+    template <typename FuncType, typename Fn>
+    Live& at_slot(void** slot, FuncType tag, Fn fn) {
+        return at_slot(slot, tag).onInvoke(std::move(fn));
     }
 };
 

@@ -1,0 +1,223 @@
+// ─── Naming the vtable slot itself, with no object to read it out of ──────
+//
+// `splice::Vtable` takes an instance and reads the table pointer out of it.
+// That covers the caller who has an object, which is most of them, and it
+// cannot cover the caller who has only an address: one that resolved the slot
+// in another process, translated it across module bases, and is installing
+// before any instance of the interface exists in this one. `at_slot` is for
+// that caller, and these cases are what it owes them.
+//
+// Two things are being checked and they are different. First, that naming the
+// slot reaches the same site as naming the object -- which is why the slot's
+// address comes from inside the provider module rather than from arithmetic
+// the test does itself, since two copies of the same arithmetic agreeing
+// proves nothing. Second, that `.expect` is load-bearing here in a way it is
+// not for `Vtable`: nothing in the library can tell whether a slot address
+// handed to it is right, so the comparison against an independently obtained
+// function address is the whole of the admission, and a disagreement has to
+// write nothing at all.
+// ───────────────────────────────────────────────────────────────────────────
+#include <gtest/gtest.h>
+
+#include <splice/live.h>
+
+#include "vtable_provider.h"
+
+#include <atomic>
+#include <cstring>
+
+namespace {
+
+using splice::test::ICalculator;
+
+std::atomic<int> g_scale_calls{0};
+
+void reset_counters() { g_scale_calls.store(0); }
+
+int slot_of_scale() {
+    auto pmf = &ICalculator::scale;
+    unsigned char raw[sizeof(pmf)];
+    std::memcpy(raw, &pmf, sizeof(pmf));
+    return splice_vtable_slot_of_pmf(raw, static_cast<unsigned int>(sizeof(pmf)));
+}
+
+using ScaleFn = int (*)(ICalculator*, int);
+
+class SlotByAddress : public ::testing::Test {
+protected:
+    void SetUp() override {
+        reset_counters();
+        splice::test::calculator()->set_factor(3);
+    }
+
+    void TearDown() override {
+        if (m_outcome.active()) EXPECT_TRUE(m_outcome.disable());
+        splice::test::calculator()->set_factor(3);
+    }
+
+    splice::Outcome m_outcome;
+};
+
+} // namespace
+
+TEST_F(SlotByAddress, a_slot_named_by_its_address_is_swapped_and_put_back) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void** const slot = splice::test::table_slot(index);
+    ASSERT_NE(slot, nullptr);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(slot, ScaleFn{}, [](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value) + 1;
+        })
+        .install(splice::slot_swap);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed)
+        << "op=" << static_cast<int>(m_outcome.failure().operation);
+    EXPECT_EQ(calc->scale(5), 16);                 // 5*3 then +1 from the callback
+    EXPECT_EQ(g_scale_calls.load(), 1);
+
+    // The slot, not the function: the provider's own entry has moved.
+    EXPECT_NE(splice::test::table_entry(index), original);
+
+    ASSERT_TRUE(m_outcome.disable());
+    EXPECT_EQ(splice::test::table_entry(index), original);
+    EXPECT_EQ(calc->scale(5), 15);
+}
+
+// The one assertion that proves `at_slot` does the same arithmetic the object
+// route does. Both are installed in turn against the same method, and the
+// address the provider reports has to move for each of them.
+TEST_F(SlotByAddress, naming_the_slot_reaches_the_same_site_as_naming_the_object) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void* const original = splice::test::table_entry(index);
+
+    splice::Outcome by_object = splice::Vtable<ICalculator>{calc}
+        .on(&ICalculator::scale, [](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value);
+        })
+        .install(splice::slot_swap);
+    ASSERT_EQ(by_object.state(), splice::State::installed);
+    void* const through_object = splice::test::table_entry(index);
+    EXPECT_NE(through_object, original);
+    ASSERT_TRUE(by_object.disable());
+    ASSERT_EQ(splice::test::table_entry(index), original);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(splice::test::table_slot(index), ScaleFn{},
+                 [](auto orig, ICalculator* self, int value) {
+                     g_scale_calls.fetch_add(1);
+                     return orig(self, value);
+                 })
+        .install(splice::slot_swap);
+    ASSERT_EQ(m_outcome.state(), splice::State::installed);
+
+    // Not the same stub -- each group claims its own -- but the same cell,
+    // which is the claim: `table_slot(index)` addresses what `.on(pmf)`
+    // resolves to.
+    EXPECT_NE(splice::test::table_entry(index), original);
+    EXPECT_EQ(calc->scale(5), 15);
+    EXPECT_EQ(g_scale_calls.load(), 1);
+}
+
+// The admission rule, in the smallest form it has. A slot address the caller
+// computed wrongly would otherwise be a pointer-sized write to somewhere it
+// had no business being, and `.expect` is what turns that into a refusal.
+TEST_F(SlotByAddress, a_slot_that_does_not_hold_the_expected_function_is_refused) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void** const slot = splice::test::table_slot(index);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(slot, ScaleFn{})
+        .expect(reinterpret_cast<void*>(&reset_counters))
+        .onInvoke([](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value) + 1;
+        })
+        .install(splice::slot_swap);
+
+    EXPECT_EQ(m_outcome.state(), splice::State::refused);
+    EXPECT_EQ(m_outcome.failure().operation, splice::Operation::read_slot);
+    EXPECT_EQ(splice::test::table_entry(index), original)
+        << "a refusal writes nothing";
+    EXPECT_EQ(calc->scale(5), 15);
+    EXPECT_EQ(g_scale_calls.load(), 0);
+}
+
+// And the agreeing case, stated separately, because a refusal test passes just
+// as well against a form that refuses everything.
+TEST_F(SlotByAddress, the_expected_function_is_the_one_the_slot_holds) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(splice::test::table_slot(index), ScaleFn{})
+        .expect(splice::test::table_entry(index))
+        .onInvoke([](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value) + 1;
+        })
+        .install(splice::slot_swap);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed);
+    EXPECT_EQ(calc->scale(5), 16);
+    EXPECT_EQ(g_scale_calls.load(), 1);
+}
+
+TEST_F(SlotByAddress, a_null_slot_address_is_refused_before_anything_is_claimed) {
+    m_outcome = splice::Live<>{}
+        .at_slot(nullptr, ScaleFn{}, [](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value);
+        })
+        .install(splice::slot_swap);
+
+    EXPECT_EQ(m_outcome.state(), splice::State::refused);
+    EXPECT_EQ(m_outcome.failure().operation, splice::Operation::resolve_slot);
+    EXPECT_EQ(splice::test::calculator()->scale(5), 15);
+}
+
+// The tier distinction, for a site named this way. The coordinated tier reads
+// the slot to find the function and then patches the function, so the slot
+// must come back unchanged -- the same observation the Vtable tests make, and
+// the only one that separates "the coordinated tier installed" from "something
+// quietly did a slot swap instead".
+TEST_F(SlotByAddress, the_coordinated_tier_reads_the_slot_and_patches_what_it_finds) {
+    if (!splice::live_tier_available()) {
+        GTEST_SKIP() << "the coordinated tier needs an architecture whose "
+                        "prologue can be planned and an OS that can suspend a "
+                        "thread; this build has one or neither";
+    }
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(splice::test::table_slot(index), ScaleFn{},
+                 [](auto orig, ICalculator* self, int value) {
+                     g_scale_calls.fetch_add(1);
+                     return orig(self, value) + 1;
+                 })
+        .install(splice::live);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed)
+        << "stage=" << static_cast<int>(m_outcome.failure().stage)
+        << " op=" << static_cast<int>(m_outcome.failure().operation)
+        << " err=" << m_outcome.failure().os_error;
+
+    EXPECT_EQ(calc->scale(5), 16);
+    EXPECT_EQ(g_scale_calls.load(), 1);
+    EXPECT_EQ(splice::test::table_entry(index), original)
+        << "the call arrived through a patched prologue, not a swapped pointer";
+}

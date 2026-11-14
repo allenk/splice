@@ -91,6 +91,10 @@ SPLICE_VTABLE_API IWide* wide();
 // provider so the test can compare it against what splice resolved without
 // reaching into the table itself.
 SPLICE_VTABLE_API void* table_entry(int slot_index);
+
+// The address OF the slot, for a group that names the slot rather than an
+// object. `table_entry(i)` is what the slot holds; this is where it lives.
+SPLICE_VTABLE_API void** table_slot(int slot_index);
 SPLICE_VTABLE_API void* wide_table_entry(int slot_index);
 
 } // namespace splice::test
