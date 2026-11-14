@@ -751,8 +751,16 @@ public:
             group->sites.push_back(detail::InstalledSite{
                 static_cast<void*>(pending.slot), splice_patch_record{},
                 pending.settle});
+            // Conditional on the value `read_slot` saw above, not an
+            // unconditional store. Between that reading and this write another
+            // overlay can take the slot; overwriting them would also mean the
+            // original published a few lines ago is the value from before they
+            // arrived, so calling it would skip their hook. A mismatch is
+            // their hook, and the answer is to refuse the whole group.
             splice_patch_record record{};
-            if (splice_vtable_swap(pending.slot, pending.stub, nullptr, &record) != 0) {
+            void* found = nullptr;
+            if (splice_vtable_swap_expect(pending.slot, original, pending.stub,
+                                          &found, &record) != 0) {
                 group->sites.pop_back();
                 return undo(group, pending.site, Operation::write_slot);
             }

@@ -29,6 +29,32 @@ namespace splice::engine {
 // before calling, which for a hook means the original-function registry and
 // the callback. Publishing in the other order is a live call through a null
 // original, and that is a bug this project has already paid for once.
+//
+// Last writer wins, and the previous value is whatever was there at the
+// instant of the store. Use this only when the caller has no earlier reading
+// of the slot to honour; a caller that read the slot first wants the function
+// below instead.
 bool swap_pointer_slot(void** slot, void* new_func, void** out_previous);
+
+// Store `new_func` into `*slot` only while it still holds `expected`, and
+// report what was actually there through `found` (may be null) whether or not
+// it matched. Returns false, having written nothing, on a mismatch or when the
+// slot cannot be made writable.
+//
+// Why this exists, and why the unconditional form is not enough for an
+// install: a group install reads the slot in one phase to learn the original
+// function, publishes that original where the hook will look for it, and
+// stores the new pointer in a later phase. Between the reading and the store,
+// another overlay can take the same slot. An unconditional store then
+// overwrites it without a word -- and worse, the original this hook publishes
+// is the value from before that overlay arrived, so calling it skips their
+// hook entirely. Neither outcome is detectable afterwards from the bytes.
+//
+// The comparison closes that window to the width of one atomic operation, and
+// it is the pointer-slot equivalent of the second prologue comparison the
+// inline tier performs immediately before it writes. A mismatch is somebody
+// else's hook, which is a refusal and not an error to retry.
+bool swap_pointer_slot_expect(void** slot, void* expected, void* new_func,
+                              void** found);
 
 } // namespace splice::engine

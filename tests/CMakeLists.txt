@@ -55,6 +55,7 @@ add_executable(splice_unit_test
     test_reentrancy.cpp
     test_os_threads.cpp
     live/test_vtable_slot.cpp
+    live/test_vtable_swap_expect.cpp
     live/test_vtable_portable.cpp
     live/test_live_tier.cpp
     live/test_live_boundary.cpp

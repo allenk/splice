@@ -782,6 +782,35 @@ int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
     return 0;
 }
 
+int splice_vtable_swap_expect(void** slot, void* expected, void* new_func,
+                              void** out_found,
+                              splice_patch_record* out_record) {
+    if (slot == nullptr || new_func == nullptr) {
+        SPLICE_LOGE("splice_vtable_swap_expect: null slot or new_func");
+        return -1;
+    }
+
+    // Same lock and the same reason as the unconditional form above.
+    const std::lock_guard<std::mutex> installing(splice::engine::install_mutex());
+
+    void* found = nullptr;
+    if (!splice::engine::swap_pointer_slot_expect(slot, expected, new_func,
+                                                  &found)) {
+        if (out_found != nullptr) *out_found = found;
+        return -1;
+    }
+    if (out_found != nullptr) *out_found = found;
+    if (out_record != nullptr) {
+        *out_record = splice_patch_record{};
+        out_record->strategy = SPLICE_PATCH_STRATEGY_DATA_SLOT;
+        out_record->hook_site = static_cast<void*>(slot);
+        out_record->pre_hook_pointer = expected;
+    }
+    SPLICE_LOGI("Hooked via vtable slot %p: %p -> %p (expected match)",
+                static_cast<void*>(slot), expected, new_func);
+    return 0;
+}
+
 void* splice_hook_address(void* target_addr, void* new_func, void** original_func) {
     if (new_func == nullptr) {
         SPLICE_LOGE("splice_hook_address: null new_func");

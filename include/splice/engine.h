@@ -285,6 +285,26 @@ int splice_vtable_slot_of_pmf(const void* pmf_bytes, unsigned int pmf_size);
 int splice_vtable_swap(void** slot, void* new_func, void** out_previous,
                        splice_patch_record* out_record);
 
+// The same store, performed only while `*slot` still holds `expected`.
+// `out_found` (may be null) receives what the slot actually held, whether or
+// not it matched. Returns 0 on success, -1 on a mismatch or on a slot that
+// cannot be made writable; on -1 nothing was written.
+//
+// Use this whenever the caller read the slot earlier and is acting on that
+// reading. A group install does: it reads the slot in one phase to learn the
+// original function, publishes that original where the hook will look for it,
+// and stores the new pointer in a later phase. Another overlay taking the
+// slot in between would be silently overwritten by the unconditional form --
+// and the original this hook published would be the value from before they
+// arrived, so calling it would skip their hook. Neither is visible afterwards
+// from the bytes.
+//
+// A mismatch is somebody else's hook. It is a refusal, not an error to retry:
+// retrying is the unconditional form by another name.
+int splice_vtable_swap_expect(void** slot, void* expected, void* new_func,
+                              void** out_found,
+                              splice_patch_record* out_record);
+
 // ─── The coordinated tier: a group of inline patches, one suspension ──────
 //
 // Two calls, and the split is the contract. `prepare` does every allocation,
