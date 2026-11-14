@@ -54,6 +54,7 @@ add_executable(splice_unit_test
     test_hook_member.cpp
     test_reentrancy.cpp
     test_os_threads.cpp
+    test_c_abi_completeness.cpp
     live/test_vtable_slot.cpp
     live/test_vtable_swap_expect.cpp
     live/test_vtable_portable.cpp
@@ -76,6 +77,13 @@ target_link_libraries(splice_unit_test PRIVATE
     GTest::gtest
     GTest::gtest_main
 )
+# The repository root, for the one test whose subject is the source text
+# itself: the C ABI's two implementations have to name every entry point the
+# public header declares, and only one of them is ever compiled here.
+target_compile_definitions(splice_unit_test PRIVATE
+    SPLICE_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
 # Let ARM64 golden tests reach private src/arch/arm64/disasm.h
 target_include_directories(splice_unit_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src

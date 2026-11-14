@@ -28,6 +28,39 @@ int splice_vtable_swap(void**, void*, void**, splice_patch_record*) {
     return -1;
 }
 
+int splice_vtable_swap_expect(void**, void*, void*, void** out_found,
+                              splice_patch_record*) {
+    SPLICE_LOGW_ONCE("splice_vtable_swap_expect: no backend compiled for this "
+                     "platform");
+    // A refusal still answers the question the caller asked -- "what is in the
+    // slot?" -- and null is not that answer, so say nothing rather than
+    // something false. The caller is told it was refused by the return value.
+    (void)out_found;
+    return -1;
+}
+
+// Reading bytes needs no OS layer, but deciding how many of them a patch would
+// displace needs the arch decoder, and a platform without one has no honest
+// answer. `out` is left untouched, which is what the header promises for a
+// failure, so a caller cannot mistake a zeroed struct for a measured one.
+int splice_prologue_profile(const void*, splice_prologue_facts*) {
+    SPLICE_LOGW_ONCE("splice_prologue_profile: no decoder compiled for this "
+                     "platform");
+    return -1;
+}
+
+// Resolution is the OS layer's job and this platform has none compiled, so
+// there is nothing to ask. Returning null is the same answer the real one
+// gives for a module or symbol it cannot find, and the caller already has to
+// handle it.
+void* splice_resolve_symbol(const char* lib_name, const char* symbol_name) {
+    SPLICE_LOGW_ONCE("splice_resolve_symbol: no backend compiled for this "
+                     "platform (ignored: %s::%s)",
+                     lib_name ? lib_name : "(nil)",
+                     symbol_name ? symbol_name : "(nil)");
+    return nullptr;
+}
+
 int splice_live_supported(void) { return 0; }
 
 void* splice_live_prepare(const splice_live_site*, unsigned int, void**,
