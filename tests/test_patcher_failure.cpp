@@ -17,6 +17,11 @@ unsigned frees = 0;
 unsigned writable_requests = 0;
 unsigned restore_requests = 0;
 bool allow_write = false;
+// The flush is a formality on x86-64 and the code may not treat it as one:
+// an unflushed trampoline is not a trampoline on every architecture this
+// patcher's shape is shared with.
+bool allow_flush = true;
+unsigned flush_requests = 0;
 std::size_t writable_size = 0;
 std::size_t restored_size = 0;
 void* writable_address = nullptr;
@@ -48,7 +53,10 @@ void restore_executable(void* address, std::size_t size) {
     restored_size = size;
 }
 
-bool flush_instruction_cache(void*, std::size_t) { return true; }
+bool flush_instruction_cache(void*, std::size_t) {
+    ++flush_requests;
+    return allow_flush;
+}
 std::size_t page_size() { return 4096; }
 }
 
@@ -109,6 +117,62 @@ TEST(PatcherFailure, denied_write_does_not_publish_or_modify_target) {
     EXPECT_EQ(callback_calls, 0u);
     EXPECT_EQ(original, &sentinel);
     EXPECT_EQ(target, before);
+}
+
+// A trampoline whose instructions the stream has not seen is not a trampoline,
+// and both paths that build one reach the flush while the target is still
+// untouched -- so the honest answer is a refusal that gives the block back,
+// not a warning on the way past.
+TEST(PatcherFailure, a_trampoline_that_cannot_be_flushed_is_not_a_plan) {
+    alignas(16) std::array<std::uint8_t, 64> target{};
+    target.fill(0x90);
+    const auto before = target;
+    std::array<std::uint8_t, 16> snapshot{};
+    std::copy_n(target.begin(), snapshot.size(), snapshot.begin());
+    allocations = frees = writable_requests = restore_requests = 0;
+    flush_requests = 0;
+    allow_write = true;
+    allow_flush = false;
+
+    splice::arch::x86_64::PreparedStrictPatch plan;
+    EXPECT_FALSE(plan.prepare(target.data(), target.data() + 32,
+                              snapshot.data(), snapshot.size()));
+
+    EXPECT_EQ(flush_requests, 1u);   // the intended failure was reached
+    EXPECT_EQ(allocations, 1u);
+    EXPECT_EQ(frees, 1u) << "the refused plan kept its block";
+    EXPECT_EQ(writable_requests, 0u);
+    EXPECT_EQ(plan.original(), nullptr) << "a refused plan published storage";
+    EXPECT_EQ(target, before);
+    allow_flush = true;
+}
+
+TEST(PatcherFailure, a_trampoline_that_cannot_be_flushed_is_not_installed) {
+    alignas(16) std::array<std::uint8_t, 64> target{};
+    target.fill(0x90);
+    const auto before = target;
+    int sentinel = 0;
+    void* original = &sentinel;
+    unsigned callback_calls = 0;
+    allocations = frees = writable_requests = restore_requests = 0;
+    flush_requests = 0;
+    allow_write = true;
+    allow_flush = false;
+
+    const auto result = splice::arch::x86_64::install_inline_patch(
+        target.data(), target.data() + 32, &original,
+        [](void*, void* user) { ++*static_cast<unsigned*>(user); }, &callback_calls);
+
+    EXPECT_EQ(result, nullptr);
+    EXPECT_EQ(flush_requests, 1u);
+    EXPECT_EQ(frees, 1u);
+    EXPECT_EQ(writable_requests, 0u)
+        << "the target's permissions were changed after the flush failed";
+    EXPECT_EQ(restore_requests, 0u);
+    EXPECT_EQ(callback_calls, 0u);
+    EXPECT_EQ(original, &sentinel);
+    EXPECT_EQ(target, before);
+    allow_flush = true;
 }
 
 // Fixture distances are checked, not assumed across all toolchains.

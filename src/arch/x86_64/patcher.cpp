@@ -111,7 +111,7 @@ PreparedStrictPatch::PreparedStrictPatch(PreparedStrictPatch&& other) noexcept {
 
 PreparedStrictPatch& PreparedStrictPatch::operator=(PreparedStrictPatch&& other) noexcept {
     if (this == &other) return *this;
-    if (storage_ && !committed_) {
+    if (reclaimable()) {
         splice::os::free_executable_memory(storage_, kNearBlockSize);
     }
     target_ = other.target_;
@@ -123,15 +123,17 @@ PreparedStrictPatch& PreparedStrictPatch::operator=(PreparedStrictPatch&& other)
     boundary_count_ = other.boundary_count_;
     copy_size_ = other.copy_size_;
     committed_ = other.committed_;
+    retained_ = other.retained_;
     // The source keeps its bookkeeping but loses the only field its destructor
     // acts on, so a moved-from plan is inert rather than dangerous.
     other.storage_ = nullptr;
     other.committed_ = false;
+    other.retained_ = false;
     return *this;
 }
 
 PreparedStrictPatch::~PreparedStrictPatch() {
-    if (storage_ && !committed_) splice::os::free_executable_memory(storage_, kNearBlockSize);
+    if (reclaimable()) splice::os::free_executable_memory(storage_, kNearBlockSize);
 }
 
 bool PreparedStrictPatch::prepare(void* target, void* replacement,
@@ -179,8 +181,14 @@ bool PreparedStrictPatch::prepare(void* target, void* replacement,
     }
     const auto tail = emit_jmp_abs64(storage + relocated_offset,
         static_cast<unsigned char*>(target) + source_size);
-    splice::os::flush_instruction_cache(storage, relocated_offset + tail);
-    splice::os::flush_instruction_cache(relay, 14);
+    // A trampoline the instruction stream has not seen is not a trampoline,
+    // and nothing is patched yet -- so a failed flush takes the same clean
+    // refusal every other failure in this function takes, and gives the block
+    // back. x86-64 makes this a formality; the plan is not an x86-64 document.
+    if (!splice::os::flush_instruction_cache(storage, relocated_offset + tail)) {
+        return fail();
+    }
+    if (!splice::os::flush_instruction_cache(relay, 14)) return fail();
     // Publish only a completely prepared object; cancellation owns the block.
     target_ = target;
     storage_ = storage;
@@ -412,8 +420,13 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // Step 6 — flush trampoline cache (no-op on x86, but keep the API
     // symmetric with ARM64 for portability). Covers the relay as well, which
     // must be complete and visible before step 6 patches the target.
-    splice::os::flush_instruction_cache(trampoline, total);
-    splice::os::flush_instruction_cache(relay, relay_len);
+    if (!splice::os::flush_instruction_cache(trampoline, total) ||
+        !splice::os::flush_instruction_cache(relay, relay_len)) {
+        SPLICE_LOGE("install_inline_patch: can't flush the trampoline or its "
+                    "relay; refusing before the target is touched");
+        splice::os::free_executable_memory(trampoline, kNearBlockSize);
+        return nullptr;
+    }
 
     // Complete the fallible permission change before publishing the trampoline.
     // A failed change frees it; neither output nor callback may retain it then.

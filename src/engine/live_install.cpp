@@ -219,7 +219,15 @@ void* splice_live_prepare(const splice_live_site* sites, unsigned int count,
             return refuse(LiveOperation::prepare_site, i, 0);
         }
         site.copy_size = site.plan.copy_size();
-        if (originals_out != nullptr) originals_out[i] = site.plan.original();
+        // Retention is taken here, by the act of handing the address out,
+        // rather than by any later path remembering to. A refused commit, a
+        // precondition the group fails before the first suspension, and a
+        // later site in this very loop refusing all leave the caller holding
+        // addresses it was told to publish -- and the exit path that noticed
+        // was only ever the `lost` one.
+        if (originals_out != nullptr) {
+            originals_out[i] = site.plan.publish_original();
+        }
     }
 
     // Open every other thread the OS names right now -- which is not provably
@@ -285,7 +293,7 @@ void splice_live_commit(void* handle, splice_patch_record* records_out,
         // original bytes go back.
         for (auto& site : group->sites) {
             splice::engine::remember_patched_site(site.target,
-                                                  site.plan.original());
+                                                  site.plan.publish_original());
         }
     }
     if (result.state == LiveState::installed && records_out != nullptr) {
@@ -294,7 +302,7 @@ void splice_live_commit(void* handle, splice_patch_record* records_out,
             records_out[i] = splice_patch_record{};
             records_out[i].strategy = SPLICE_PATCH_STRATEGY_INLINE;
             records_out[i].hook_site = site.target;
-            records_out[i].trampoline = site.plan.original();
+            records_out[i].trampoline = site.plan.publish_original();
             std::memcpy(records_out[i].pre_hook_bytes, site.snapshot,
                         sizeof(records_out[i].pre_hook_bytes));
             records_out[i].pre_hook_byte_len =

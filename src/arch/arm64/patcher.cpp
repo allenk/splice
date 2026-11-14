@@ -133,8 +133,14 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     const std::size_t jump_size = generate_indirect_branch(&dst[used / 4], return_addr, false);
     const std::size_t total_used = used + jump_size;
 
-    // Step 5 — flush trampoline cache.
-    splice::os::flush_instruction_cache(trampoline, total_used);
+    // Step 5 — flush trampoline cache. Not a formality on this
+    // architecture: an unflushed trampoline is stale instructions, and since
+    // the target is still untouched, refusing costs nothing but the block.
+    if (!splice::os::flush_instruction_cache(trampoline, total_used)) {
+        SPLICE_LOGE("install_inline_patch: failed to flush the trampoline");
+        splice::os::free_executable_memory(trampoline, trampoline_size);
+        return nullptr;
+    }
 
     // Complete the fallible protection change before publishing ownership.
     // On failure the trampoline is freed and must not escape through either

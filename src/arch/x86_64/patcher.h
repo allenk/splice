@@ -52,9 +52,26 @@ public:
     std::size_t copy_size() const noexcept { return copy_size_; }
     void* target() const noexcept { return target_; }
     bool prepared() const noexcept { return storage_ && !committed_; }
+    // Handing the trampoline out is what makes it unreclaimable, so the two
+    // are one operation and there is no way to publish without retaining.
+    // `original()` above stays a pure reader, for the callers that only want
+    // to look at it.
+    [[nodiscard]] void* publish_original() noexcept {
+        retained_ = true;
+        return storage_;
+    }
     // Recovery could leave a context pointing at unpublished storage. Retain
-    // it permanently and prevent further commits; this is not commit success.
-    void retain_storage() noexcept { committed_ = true; }
+    // it permanently; this is neither commit success nor a bar to committing.
+    // Conflating the two is what made retention impossible to take at the
+    // moment of publication: the flag that meant "never free" was also the
+    // flag that refuses the write.
+    void retain_storage() noexcept { retained_ = true; }
+    // The destructor's own condition, read from outside. Storage is
+    // reclaimable only while nothing can reach it: no write landed, and the
+    // address was never handed to anybody.
+    [[nodiscard]] bool reclaimable() const noexcept {
+        return storage_ && !committed_ && !retained_;
+    }
     // False means invalid plan or interior non-boundary IP; output unchanged.
     // IPs outside the displaced prefix are returned unchanged.
     bool map_ip(std::uintptr_t ip, std::uintptr_t& mapped) const noexcept;
@@ -77,6 +94,7 @@ private:
     std::size_t boundary_count_{};
     std::size_t copy_size_{};
     bool committed_{};
+    bool retained_{};
 };
 
 // Install an inline patch at `target` that redirects to `new_func`.

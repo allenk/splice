@@ -706,8 +706,23 @@ int splice_disable(const splice_patch_record* record) {
             }
 #   endif
 
-            splice::os::flush_instruction_cache(target, 16);
+            // The bytes are already back, so there is nothing to refuse here.
+            // What a failed flush costs is the guarantee that they are
+            // *visible*, and on ARM64 a stale line really does go on executing
+            // the patch that was just removed. Protection goes back either
+            // way; the caller is told the disable did not complete, and
+            // replaying the same bytes over the same window is safe to retry.
+            // The site stays registered on that path on purpose: while the
+            // removal may not be visible, the next install must still stop at
+            // ours rather than follow it.
+            const bool flushed = splice::os::flush_instruction_cache(target, 16);
             splice::os::restore_executable(target, 16);
+            if (!flushed) {
+                SPLICE_LOGE("splice_disable: the restored prologue at %p could "
+                            "not be flushed -- it is back, but may not be "
+                            "visible to every thread", target);
+                return -1;
+            }
 
             // The original bytes are back, so this address is no longer one of
             // ours: a later install here is legitimate, and unwrap_jump_stub

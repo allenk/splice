@@ -642,6 +642,64 @@ TEST_F(FaultMatrix, a_duplicate_anywhere_in_a_large_set_refuses_before_suspendin
     ExpectNothingWritten();
 }
 
+// ─── a refused commit, and what the caller was told to publish ────────────
+//
+// prepare writes every trampoline address out to the caller, and the public
+// contract tells the caller to publish those addresses *before* committing.
+// A commit that then fails cleanly used to free them: `retain_all` was on the
+// four `lost` paths and on none of the ordinary refusals, so an ordinary
+// refusal -- a thread that would not suspend, a snapshot that moved -- handed
+// back addresses in freed executable memory.
+//
+// The site that discriminates is the one that was never written. Sites that
+// were written and rolled back are retained by the commit flag already, and
+// deliberately so.
+
+TEST_F(FaultMatrix, a_refused_commit_keeps_every_trampoline_it_published) {
+    auto group = make_group(4, 2);
+    auto ops = make_ops();
+
+    void* published[4]{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        published[i] = group.sites[i].plan.publish_original();
+        ASSERT_NE(published[i], nullptr) << "site " << i;
+    }
+
+    // Site 3's prologue moves after it was planned, so its write is refused
+    // and the three before it are rolled back.
+    blocks[3][0] = 0xcc;
+    expected[3 * 16] = 0xcc;
+
+    const auto result = commit_group(group, ops);
+
+    ASSERT_EQ(result.state, LiveState::recovered);
+    for (std::size_t i = 0; i < 4; ++i) {
+        EXPECT_FALSE(group.sites[i].plan.reclaimable())
+            << "site " << i << " published " << published[i]
+            << " and a clean refusal would have freed it";
+    }
+}
+
+// And the other half of the same claim: retention follows publication, it is
+// not unconditional. A group whose addresses were never handed out owes
+// nobody anything, and its storage is still reclaimable after a refusal --
+// which is what keeps "retained from the moment a pointer is handed out" a
+// statement about publication rather than a leak with a reason attached.
+
+TEST_F(FaultMatrix, a_refusal_still_reclaims_what_was_never_handed_out) {
+    auto group = make_group(2, 2);
+    auto ops = make_ops();
+
+    blocks[1][0] = 0xcc;
+    expected[1 * 16] = 0xcc;
+
+    const auto result = commit_group(group, ops);
+
+    ASSERT_EQ(result.state, LiveState::recovered);
+    EXPECT_TRUE(group.sites[1].plan.reclaimable())
+        << "site 1 was never written and never published";
+}
+
 // ─── the plan, moved ──────────────────────────────────────────────────────
 
 TEST_F(FaultMatrix, a_moved_from_plan_owns_nothing) {
@@ -650,9 +708,12 @@ TEST_F(FaultMatrix, a_moved_from_plan_owns_nothing) {
     // place. So the move is exercised here or nowhere, and "nowhere" means a
     // double free waiting for the first caller who grows a group.
     //
-    // prepared() is the destructor's own condition read from outside: storage
-    // held and not yet committed. A source that still reports true after being
-    // moved from is a second owner of one trampoline.
+    // reclaimable() is the destructor's own condition read from outside:
+    // storage held, no write landed, and the address never handed out. A
+    // source that still reports true after being moved from is a second owner
+    // of one trampoline. `prepared()` is a different question -- whether the
+    // plan may still be committed -- and both are checked here because the
+    // move has to carry each of them.
     unsigned char snapshot[16]{};
     std::memcpy(snapshot, blocks[0], sizeof(snapshot));
     ASSERT_TRUE(splice::os::make_executable_writable(blocks[0], 16));
@@ -660,10 +721,13 @@ TEST_F(FaultMatrix, a_moved_from_plan_owns_nothing) {
     splice::arch::x86_64::PreparedStrictPatch source;
     ASSERT_TRUE(source.prepare(blocks[0], replacement, snapshot, sizeof(snapshot)));
     ASSERT_TRUE(source.prepared());
+    ASSERT_TRUE(source.reclaimable());
     void* const trampoline = source.original();
 
     splice::arch::x86_64::PreparedStrictPatch moved(std::move(source));
-    EXPECT_FALSE(source.prepared()) << "the source still owns the trampoline";
+    EXPECT_FALSE(source.reclaimable()) << "the source still owns the trampoline";
+    EXPECT_FALSE(source.prepared());
+    EXPECT_TRUE(moved.reclaimable());
     EXPECT_TRUE(moved.prepared());
     EXPECT_EQ(moved.original(), trampoline) << "the trampoline moved, not copied";
     EXPECT_EQ(moved.target(), blocks[0]);

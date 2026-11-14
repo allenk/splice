@@ -46,6 +46,44 @@ TEST_F(PreparedPatch, preparation_preserves_target_and_maps_exact_boundaries) {
     EXPECT_EQ(reinterpret_cast<int (*)()>(trampoline + 3)(), 42);
 }
 
+// Publishing the trampoline is what makes it unreclaimable, and it must not
+// cost the plan its commit. Those two used to be one flag: "never free" was
+// spelled `committed_ = true`, which is also what refuses the write -- so
+// retention could only be taken after the write, which is exactly where the
+// paths that forgot it were.
+
+TEST_F(PreparedPatch, publishing_the_trampoline_retains_it_without_spending_the_commit) {
+    PreparedStrictPatch plan;
+    ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
+    ASSERT_TRUE(plan.reclaimable());
+
+    void* const trampoline = plan.publish_original();
+    ASSERT_EQ(trampoline, plan.original());
+
+    EXPECT_FALSE(plan.reclaimable()) << "a published address is not free memory";
+    ASSERT_TRUE(plan.prepared()) << "retention is not commit success";
+
+    // The commit still works, which is the half the old single flag could not
+    // have: with retention spelled as `committed_`, this would be refused.
+    ASSERT_TRUE(splice::os::make_executable_writable(block, 5));
+    EXPECT_TRUE(plan.commit_write());
+    splice::os::flush_instruction_cache(block, 5);
+    splice::os::restore_executable(block, 5);
+    EXPECT_EQ(reinterpret_cast<int (*)()>(block)(), 99);
+    EXPECT_EQ(reinterpret_cast<int (*)()>(trampoline)(), 42);
+}
+
+// Recovery's own retention takes the same route, so a plan that never got as
+// far as a write is still never freed once something might point into it.
+
+TEST_F(PreparedPatch, retained_storage_outlives_a_plan_that_never_committed) {
+    PreparedStrictPatch plan;
+    ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
+    plan.retain_storage();
+    EXPECT_FALSE(plan.reclaimable());
+    EXPECT_TRUE(plan.prepared());
+}
+
 TEST_F(PreparedPatch, controlled_commit_is_single_use_and_preserves_tail) {
     PreparedStrictPatch plan;
     ASSERT_TRUE(plan.prepare(block, block + 1024, expected.data(), 16));
