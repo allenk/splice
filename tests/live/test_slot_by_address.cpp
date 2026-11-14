@@ -221,3 +221,118 @@ TEST_F(SlotByAddress, the_coordinated_tier_reads_the_slot_and_patches_what_it_fi
     EXPECT_EQ(splice::test::table_entry(index), original)
         << "the call arrived through a patched prologue, not a swapped pointer";
 }
+
+// ─── .replace_with() on a site named by its slot ──────────────────────────
+//
+// The verb for a caller whose own function is the hook, so splice wraps
+// nothing and publishes the displaced pointer into the caller's atomic. It
+// reaches the group through `adopt_site` rather than `add_pending`, and until
+// `at_slot` existed nothing had ever combined the two: every site in the
+// shipping consumer was named by address, and the tests above this line all
+// use `.onInvoke`. `adopt_site` took a target and no slot, so this
+// combination refused in prepare with "names neither a slot nor an address"
+// -- for `Vtable` as much as for `at_slot`, since a method named by a
+// pointer-to-member also has a null target.
+//
+// The replacement has to be a real function with a real body: `replace_with`
+// puts it in the call path, so the provider's method dispatches straight into
+// it.
+
+std::atomic<void*> g_scale_original{nullptr};
+
+int replaced_scale(ICalculator* self, int value) {
+    g_scale_calls.fetch_add(1);
+    auto original = reinterpret_cast<ScaleFn>(
+        g_scale_original.load(std::memory_order_acquire));
+    return original == nullptr ? -1 : original(self, value) + 100;
+}
+
+class SlotReplaceWith : public ::testing::Test {
+protected:
+    void SetUp() override {
+        reset_counters();
+        g_scale_original.store(nullptr, std::memory_order_release);
+        splice::test::calculator()->set_factor(3);
+    }
+
+    void TearDown() override {
+        if (m_outcome.active()) EXPECT_TRUE(m_outcome.disable());
+        splice::test::calculator()->set_factor(3);
+    }
+
+    splice::Outcome m_outcome;
+};
+
+TEST_F(SlotReplaceWith, a_slot_named_by_address_takes_the_callers_own_replacement) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(splice::test::table_slot(index), ScaleFn{})
+        .expect(original)
+        .replace_with(&replaced_scale, g_scale_original)
+        .install(splice::slot_swap);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed)
+        << "stage=" << static_cast<int>(m_outcome.failure().stage)
+        << " op=" << static_cast<int>(m_outcome.failure().operation);
+
+    // Published before the write, which is what makes the first call safe.
+    EXPECT_EQ(g_scale_original.load(std::memory_order_acquire), original);
+    // And the cell holds our function itself, not a splice stub, because that
+    // is what this verb means.
+    EXPECT_EQ(splice::test::table_entry(index), reinterpret_cast<void*>(&replaced_scale));
+
+    EXPECT_EQ(calc->scale(5), 115);                // 5*3 then +100
+    EXPECT_EQ(g_scale_calls.load(), 1);
+
+    ASSERT_TRUE(m_outcome.disable());
+    EXPECT_EQ(splice::test::table_entry(index), original);
+    EXPECT_EQ(calc->scale(5), 15);
+}
+
+// `.expect` has to be honoured on this route too. It travels through a
+// different function than it does for `.onInvoke`, so a fix that carried the
+// slot and forgot the expectation would pass the test above and install over
+// another overlay here.
+TEST_F(SlotReplaceWith, the_expectation_still_refuses_a_slot_that_moved) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(splice::test::table_slot(index), ScaleFn{})
+        .expect(reinterpret_cast<void*>(&reset_counters))
+        .replace_with(&replaced_scale, g_scale_original)
+        .install(splice::slot_swap);
+
+    EXPECT_EQ(m_outcome.state(), splice::State::refused);
+    EXPECT_EQ(m_outcome.failure().operation, splice::Operation::read_slot);
+    EXPECT_EQ(splice::test::table_entry(index), original);
+    EXPECT_EQ(g_scale_original.load(std::memory_order_acquire), nullptr);
+    EXPECT_EQ(calc->scale(5), 15);
+}
+
+// The other route to a slot-named site, which had the same hole for the same
+// reason: a method named by a pointer-to-member has a null target too.
+TEST_F(SlotReplaceWith, a_method_named_by_pointer_to_member_takes_one_too) {
+    ICalculator* calc = splice::test::calculator();
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Vtable<ICalculator>{calc}
+        .on(&ICalculator::scale)
+        .replace_with(&replaced_scale, g_scale_original)
+        .install(splice::slot_swap);
+
+    ASSERT_EQ(m_outcome.state(), splice::State::installed)
+        << "stage=" << static_cast<int>(m_outcome.failure().stage)
+        << " op=" << static_cast<int>(m_outcome.failure().operation);
+    EXPECT_EQ(g_scale_original.load(std::memory_order_acquire), original);
+    EXPECT_EQ(calc->scale(5), 115);
+    EXPECT_EQ(g_scale_calls.load(), 1);
+}

@@ -641,11 +641,11 @@ public:
         }
         auto* publish_to = &original;
         m_owner.adopt_site(
-            m_target, reinterpret_cast<void*>(replacement),
+            m_slot_index, m_slot, m_target, reinterpret_cast<void*>(replacement),
             [publish_to](void* displaced) {
                 publish_to->store(displaced, std::memory_order_release);
             },
-            nullptr, m_expected_prologue);
+            nullptr, m_expected_prologue, m_expected, m_expect_set);
         return m_owner;
     }
 
@@ -924,22 +924,34 @@ public:
     // This exists so `install_all(splice::live)` is the same transaction and
     // not a second copy of it. Rewriting a fault matrix is how an assertion
     // gets weakened, and this one has twenty-two cases.
-    void adopt_site(void* target, void* stub,
+    // A site whose callback is already the hook. It takes a slot or a target
+    // for the same reason `add_pending` does: a site can be named either way,
+    // and which one it was named by is the tier's business rather than the
+    // verb's. Until this carried the slot, `.replace_with()` was unreachable
+    // for every slot-named site -- through `Vtable` as well as `at_slot` --
+    // because it passed a null target into the test two lines down and the
+    // group refused in prepare. Nothing had ever asked for that combination:
+    // the shipping consumer named all seven of its sites by address.
+    void adopt_site(int slot_index, void** slot, void* target, void* stub,
                     std::function<void(void*)> publish,
                     std::function<void(const splice_patch_record*)> settle,
-                    const unsigned char* expected_prologue = nullptr) {
-        const Site site{m_sites.size(), -1};
+                    const unsigned char* expected_prologue = nullptr,
+                    void* expected = nullptr, bool expect_set = false) {
+        const Site site{m_sites.size(), slot_index};
         if (m_failed) return;
-        if (target == nullptr || stub == nullptr) {
-            SPLICE_LOGE("splice: adopted site %zu has no target or no stub",
-                        site.ordinal);
+        if ((slot == nullptr && target == nullptr) || stub == nullptr) {
+            SPLICE_LOGE("splice: adopted site %zu names neither a slot nor an "
+                        "address, or has no stub", site.ordinal);
             fail(Stage::prepare, Operation::resolve_slot, 0, site);
             return;
         }
         detail::PendingSite pending;
         pending.site   = site;
+        pending.slot   = slot;
         pending.target = target;
         pending.stub   = stub;
+        pending.expected = expected;
+        pending.expect_set = expect_set;
         // The entry's gates were wrapped around its callback when the action
         // verb committed, so there is nothing here for a group gate to wrap:
         // the group_bit and the group's scope cannot be applied to this site
@@ -1437,7 +1449,10 @@ public:
                                    Operation::resolve_slot, 0, 0});
         }
         if (contribution.target == nullptr) continue;   // already installed
-        group.adopt_site(contribution.target, contribution.stub,
+        // A queued hook names a function, by symbol or by address, so there
+        // is no slot for it -- which is also why the slot_swap form of this
+        // verb refuses outright a few lines below.
+        group.adopt_site(-1, nullptr, contribution.target, contribution.stub,
                          std::move(contribution.publish),
                          std::move(contribution.settle));
         ++sites;
