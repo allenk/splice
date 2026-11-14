@@ -20,10 +20,13 @@
 #include <gtest/gtest.h>
 
 #include "engine/live_install.h"
+
+#include <splice/engine.h>
 #include "os/memory.h"
 
 #include <array>
 #include <cstring>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -478,6 +481,108 @@ TEST_F(FaultMatrix, a_flush_failure_keeps_the_threads_suspended) {
     EXPECT_EQ(ops.resume_calls, 0u);
     ExpectStillSuspended(0);
     ExpectStillSuspended(1);
+}
+
+// ─── the rollback's own publication step ──────────────────────────────────
+//
+// The forward path treats an unflushed write as a reason not to resume
+// anybody. A restoration is also a write to code, and the undo path performed
+// none at all -- so a `recovered` outcome promised a restoration that the
+// instruction stream might not have seen, and every thread was resumed into
+// it.
+
+TEST_F(FaultMatrix, a_rollback_flushes_every_site_it_restored) {
+    auto group = make_group(6, 2);
+    auto ops = make_ops();
+
+    // Same mid-group failure as the write row: site 5 no longer holds what the
+    // plan snapshotted, so sites 0 to 4 are written and then restored.
+    blocks[5][0] = 0xcc;
+    expected[5 * 16] = 0xcc;
+
+    const auto result = commit_group(group, ops);
+
+    ASSERT_EQ(result.state, LiveState::recovered);
+    // Five restorations, five flushes. The forward flush phase is never
+    // reached, so every flush counted here belongs to the rollback.
+    EXPECT_EQ(ops.flushes, 5u);
+}
+
+TEST_F(FaultMatrix, a_rollback_whose_flush_fails_leaves_the_threads_suspended) {
+    auto group = make_group(6, 2);
+    auto ops = make_ops();
+    ops.fail_flush = true;
+    blocks[5][0] = 0xcc;
+    expected[5 * 16] = 0xcc;
+
+    const auto result = commit_group(group, ops);
+
+    // The original bytes are back in memory but may not be in the instruction
+    // stream, which is the same situation the forward flush failure answers
+    // with `lost` -- and the same answer, for the same reason. The reported
+    // failure stays the one that started the rollback rather than the flush,
+    // because the first thing that went wrong is the more useful report.
+    EXPECT_EQ(result.state, LiveState::lost);
+    EXPECT_EQ(result.failure.stage, LiveStage::write);
+    EXPECT_EQ(ops.resume_calls, 0u);
+    ExpectStillSuspended(0);
+    ExpectStillSuspended(1);
+}
+
+// ─── the rollback says nothing ────────────────────────────────────────────
+//
+// The transaction's own rule is that nothing between enlist and resume may
+// wait for a lock a suspended thread might hold, and the logging substrate is
+// `printf` plus `fflush` on one CRT's stream. This library logs from its own
+// code paths, and the group suspends every thread it enumerated -- including
+// its own -- so a thread of ours can be stopped inside `printf` while the
+// rollback runs. The restore path used to log twice on its successful path.
+//
+// This asserts the absence of output rather than its presence, which is worth
+// being explicit about: it is a weak shape of test, and it is the right one
+// here because the requirement really is that nothing is said.
+
+TEST_F(FaultMatrix, a_rollback_says_nothing_while_the_threads_are_suspended) {
+    auto group = make_group(6, 2);
+    auto ops = make_ops();
+    blocks[5][0] = 0xcc;
+    expected[5 * 16] = 0xcc;
+
+    ::testing::internal::CaptureStdout();
+    const auto result = commit_group(group, ops);
+    const std::string said = ::testing::internal::GetCapturedStdout();
+
+    ASSERT_EQ(result.state, LiveState::recovered);
+    EXPECT_EQ(said.find("atomic_disable"), std::string::npos)
+        << "the rollback restored five sites and logged about it, inside the "
+           "suspension; what it said was:\n" << said;
+}
+
+// ─── release, after a lost commit ─────────────────────────────────────────
+//
+// `lost` means a thread could not be resumed and is still suspended, and both
+// halves of an ordinary release can wait on a resource such a thread holds:
+// page protection takes a lock in the kernel's address-space bookkeeping, and
+// freeing the group takes the process heap lock. So release does nothing.
+//
+// A note on the red proof for this one, because it is not a clean failure:
+// with the guard removed, the group is deleted and the assertion below reads
+// freed memory. That it is undefined behaviour rather than a clear red is
+// itself the shape of the defect -- the caller is told to call a function that
+// either hangs or, in this test, frees something it should not.
+
+TEST(LostRelease, a_lost_group_keeps_its_bookkeeping_and_its_thread_references) {
+    auto* group = new LiveGroup();
+    // An empty reference, so release_threads would clear the vector without
+    // asking the OS to close anything.
+    group->threads.push_back(EnlistedThread{});
+    group->lost = true;
+
+    splice_live_release(group);
+
+    ASSERT_EQ(group->threads.size(), 1u)
+        << "a lost group must keep the thread references a recovery needs";
+    delete group;
 }
 
 // ─── at scale ─────────────────────────────────────────────────────────────

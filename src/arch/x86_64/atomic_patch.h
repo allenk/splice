@@ -84,4 +84,27 @@ bool atomic_disable_inline(void* target,
                            const unsigned char* pre_hook_bytes,
                            unsigned int len) noexcept;
 
+// The same restore, performing no logging on any path.
+//
+// Why a second entry point rather than a flag: the group transaction rolls a
+// site back while every enlisted thread is suspended, and its own rule --
+// stated at the top of src/engine/live_install.h -- is that nothing in that
+// window may wait for a lock a suspended thread might hold. The logging
+// substrate is `printf` and `fflush` on one CRT's stream, and a suspended
+// thread of our own can be holding that stream's lock, because this library
+// logs from its own code paths. The function above logs twice on its
+// successful path and once on its fallback, so it cannot be the one the
+// rollback calls, and making it conditional would leave the hazard one
+// argument away from returning.
+//
+// Nothing is lost that was being reported: the verbose pair is compiled out
+// of release builds anyway, and the fallback warning is unreachable from the
+// rollback, because `prepare` refuses a target whose offset exceeds three and
+// the five patch bytes therefore always fit one quadword. What is dropped is a
+// debug-build diagnostic, deliberately, in exchange for a path that cannot
+// block.
+bool atomic_restore_quiet(void* target,
+                          const unsigned char* pre_hook_bytes,
+                          unsigned int len) noexcept;
+
 } // namespace splice::arch::x86_64

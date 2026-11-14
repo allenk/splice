@@ -301,25 +301,60 @@ void splice_live_commit(void* handle, splice_patch_record* records_out,
                 static_cast<unsigned int>(site.copy_size);
         }
     }
-    if (result.state == LiveState::installed) {
+    // `lost` means at least one thread is still suspended. Record that for
+    // release, and fill the caller's outcome BEFORE any diagnostic: the log
+    // call below takes a stream lock, a suspended thread of ours can be
+    // holding it, and a caller that never receives `lost` cannot act on it.
+    if (result.state == LiveState::lost) group->lost = true;
+    fill_outcome(out, result.state, result.failure,
+                 static_cast<unsigned int>(group->threads.size()));
+
+    if (result.state == LiveState::lost) {
+        // Deliberately silent. Reordering the fill above is not enough on its
+        // own: this log would still run with threads suspended, and blocking
+        // here would leave the caller inside the install forever. The outcome
+        // it already has carries the stage, the operation, the thread and the
+        // OS error, which is everything this line would have said.
+    } else if (result.state == LiveState::installed) {
         SPLICE_LOGI("splice_live_commit: %zu site(s) installed under one "
                     "suspension of %zu thread(s)",
                     group->sites.size(), group->threads.size());
     } else {
+        // refused and recovered both resumed every thread they suspended, so
+        // speaking here is safe.
         SPLICE_LOGE("splice_live_commit: state=%d site=%zu stage=%d op=%d tid=%u err=%u",
                     static_cast<int>(result.state), result.failure.site,
                     static_cast<int>(result.failure.stage),
                     static_cast<int>(result.failure.operation),
                     result.failure.thread_id, result.failure.os_error);
     }
-    fill_outcome(out, result.state, result.failure,
-                 static_cast<unsigned int>(group->threads.size()));
 }
 
 void splice_live_release(void* handle) {
     using namespace splice::engine;
     if (handle == nullptr) return;
     auto* group = static_cast<LiveGroup*>(handle);
+
+    // A `lost` group keeps everything, and this function does nothing.
+    //
+    // The contract requires the handle to be released whatever the outcome,
+    // and `lost` means at least one thread could not be resumed and is still
+    // suspended. Both of the things release normally does can wait on a
+    // resource such a thread holds: changing page protection takes a lock in
+    // the kernel address-space bookkeeping, and freeing the group vectors
+    // takes the heap lock -- the process heap, shared with everything else in
+    // the process. So the one cleanup step the caller is told it must perform
+    // would be the step that hangs.
+    //
+    // Doing nothing is the honest answer rather than a convenient one. There
+    // is no later point at which the suspensions are known to be over, because
+    // `lost` is exactly the statement that they could not be ended; deferring
+    // would mean waiting for a moment this design cannot promise arrives. The
+    // cost is one group of memory, a set of thread handles and some pages left
+    // writable, in a process that already has threads stopped in it. The
+    // caller has the outcome and has to decide what to do about it.
+    if (group->lost) return;
+
     const NativeThreadOps ops;
     // Thread references and page protection, both of which prepare took out.
     // Never the trampolines: a group that failed has retained them, and a group

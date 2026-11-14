@@ -197,6 +197,11 @@ struct LiveGroup {
     std::vector<EnlistedThread> threads;
     bool                        prepared = false;
     bool                        committed = false;
+    // Set when a commit ends `lost`, which means at least one thread could not
+    // be resumed and is still suspended. Release reads it and does nothing at
+    // all, because everything release normally does can wait on a resource a
+    // suspended thread holds. See splice_live_release.
+    bool                        lost = false;
 };
 
 // A plan whose trampoline a thread or a registry might still point at is never
@@ -306,6 +311,17 @@ LiveResult commit_group(LiveGroup& group, const Ops& ops) noexcept {
             auto& site = group.sites[i - 1];
             if (!site.written) continue;
             if (!site.plan.restore_write()) {
+                restored = false;
+                continue;
+            }
+            // A restoration is a write to code, and the forward path below
+            // treats an unflushed write as a reason not to resume anybody.
+            // The same reason applies in reverse: a thread resumed into a
+            // prologue the instruction stream has not seen is the hazard the
+            // forward flush exists for, pointing the other way. This path had
+            // no flush at all, so a `recovered` outcome promised a restoration
+            // that might not have been published.
+            if (!ops.flush(site.target, site.plan.copy_size())) {
                 restored = false;
                 continue;
             }

@@ -170,7 +170,12 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
     // The atomic sequence handles its own I-cache invalidate; this call
     // is now redundant but kept as a safety net for any non-mainstream
     // ARMv8 implementation that needs the extra flush. Cheap on real CPUs.
-    splice::os::flush_instruction_cache(target, 16);
+    if (!splice::os::flush_instruction_cache(target, 16)) {
+        SPLICE_LOGW("install_inline_patch: flushing the instruction cache at "
+                    "%p failed; the atomic sequence has already invalidated "
+                    "it, so this is a lost safety net rather than a lost "
+                    "flush", target);
+    }
 
     // Restore protection to R+X (best-effort; not fatal on failure).
     splice::os::restore_executable(target, 16);

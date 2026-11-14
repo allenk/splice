@@ -430,6 +430,17 @@ void splice_live_commit(void* group, splice_patch_record* records_out,
 // a trampoline -- a group that failed has retained its trampolines because a
 // thread may have been migrated into one, and a group that succeeded is using
 // them.
+//
+// **After a `lost` commit this function releases nothing, on purpose.** `lost`
+// means at least one thread could not be resumed and is still suspended, and
+// both halves of an ordinary release can wait on a resource such a thread
+// holds -- changing page protection takes a lock in the kernel's
+// address-space bookkeeping, and freeing the group's memory takes the process
+// heap lock. So the one step the caller is required to perform would be the
+// step that hangs. The group's memory, its thread references and the writable
+// pages are retained for the lifetime of the process instead. Calling this is
+// still correct and still required; it simply has nothing to do, and the
+// caller is not left holding an obligation it cannot discharge.
 void splice_live_release(void* group);
 
 // Disable a previously-installed hook described by `record`.

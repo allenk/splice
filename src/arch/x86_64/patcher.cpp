@@ -225,8 +225,11 @@ bool PreparedStrictPatch::restore_write() noexcept {
     // disable path uses, with the same alignment fallback.
     if (!storage_ || !committed_) return false;
     if (copy_size_ == 0 || copy_size_ > 16) return false;
-    return atomic_disable_inline(target_, expected_,
-                                 static_cast<unsigned int>(copy_size_));
+    // The quiet variant, because this runs with every enlisted thread
+    // suspended and the logging substrate takes a stream lock one of those
+    // threads can be holding. See atomic_patch.h.
+    return atomic_restore_quiet(target_, expected_,
+                                static_cast<unsigned int>(copy_size_));
 }
 
 void* install_inline_patch(void* target, void* new_func, void** original_func,
@@ -483,7 +486,16 @@ void* install_inline_patch(void* target, void* new_func, void** original_func,
         std::memset(static_cast<std::uint8_t*>(target) + patch_len, 0x90,
                     copy_size - patch_len);
     }
-    splice::os::flush_instruction_cache(target, strict ? 5 : copy_size);
+    // Checked here, because the os primitive no longer says anything on
+    // failure and this path is allowed to: nothing is suspended, the install
+    // lock is held, and a patched function whose new bytes the instruction
+    // stream has not seen is worth a line in the log even though x86 makes it
+    // nearly impossible.
+    if (!splice::os::flush_instruction_cache(target, strict ? 5 : copy_size)) {
+        SPLICE_LOGW("install_inline_patch: flushing the instruction cache at "
+                    "%p failed; the patch is in memory and may not be in the "
+                    "instruction stream", target);
+    }
     splice::os::restore_executable(target, strict ? writable_size : copy_size);
 
     // Report the route, not just the outcome. "atomic" and "via relay" answer

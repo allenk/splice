@@ -276,10 +276,16 @@ bool flush_instruction_cache(void* addr, std::size_t size) {
     // no-op in practice. Windows' FlushInstructionCache is still the right
     // primitive to call — it will do the needful on ARM64/WoA if we ever
     // target that.
-    if (::FlushInstructionCache(::GetCurrentProcess(), addr, size) != FALSE) return true;
-    SPLICE_LOGW("flush_instruction_cache(%p, %zu): failed, err=%lu",
-                addr, size, ::GetLastError());
-    return false;
+    //
+    // Says nothing on failure, on purpose. The group transaction calls this
+    // inside its frozen interval -- with every enlisted thread suspended -- and
+    // its own rule is that nothing in that window may wait for a lock a
+    // suspended thread might hold, which the logging substrate's stream lock
+    // is. A primitive cannot know which side of that line its caller is on, so
+    // it reports by returning and leaves the diagnostic to callers that are
+    // allowed to make one. The transaction turns a false into `lost`; the
+    // single-site install paths log it themselves.
+    return ::FlushInstructionCache(::GetCurrentProcess(), addr, size) != FALSE;
 }
 
 } // namespace splice::os
