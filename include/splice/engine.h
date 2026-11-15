@@ -209,6 +209,12 @@ typedef struct {
     // Counted within the entry's own page only. Filler that begins in the
     // previous page reads as absent, which understates the room rather than
     // reaching into memory the caller did not ask about.
+    //
+    // The count reads bytes in front of `target`. For a function those bytes
+    // are part of the image it lives in; for a C++ object they are outside it.
+    // So profiling a byte array -- a hand-written fixture, say -- reads one
+    // byte before that array, and a sanitizer reports it, correctly. Give such
+    // a fixture filler of its own in front of the entry it hands over.
     unsigned int entry_padding;
 } splice_prologue_facts;
 

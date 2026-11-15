@@ -50,22 +50,41 @@
 
 namespace {
 
+// A fixture handed to the profile must own the bytes in front of its entry.
+// The padding count walks backwards from the entry, clamped to the entry's own
+// page -- so an array whose first byte is the entry makes it read the byte
+// before the array, which belongs to whatever the linker put next to it. That
+// is outside the object whether or not the page is readable, which is what the
+// page-aligned fixtures further down were built to avoid.
+//
+// The two below predate the padding field and were not revisited when it
+// arrived. One of them kept passing anyway, because the linker happened to put
+// it at a page boundary, where the clamp leaves nothing to read: the same code
+// passed or failed according to where it was placed.
+constexpr std::size_t kFrontFiller = 16;
+
 // mov eax, 0x11223344   (B8 44 33 22 11)   five bytes, then ret.
 // The patch window is five bytes, so it is exactly this one instruction and
 // there is no interior boundary -- the shape the overlay admits.
-alignas(16) unsigned char g_one_instruction_entry[] = {
+alignas(4096) unsigned char g_one_instruction_block[] = {
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,   // nop, so no room in front
     0xB8, 0x44, 0x33, 0x22, 0x11,   // mov eax, imm32
     0xC3,                            // ret
 };
+unsigned char* const g_one_instruction_entry = g_one_instruction_block + kFrontFiller;
 
 // add eax, 4 / add eax, 1 / ret   (83 C0 04 | 83 C0 01 | C3)
 // Three-byte instructions, so covering five bytes takes two of them and the
 // start of the second lies inside the window -- the shape it refuses.
-alignas(16) unsigned char g_interior_boundary[] = {
+alignas(4096) unsigned char g_interior_boundary_block[] = {
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
     0x83, 0xC0, 0x04,
     0x83, 0xC0, 0x01,
     0xC3,
 };
+unsigned char* const g_interior_boundary = g_interior_boundary_block + kFrontFiller;
 
 // The shape a Windows Direct3D 12 runtime began emitting for
 // `ID3D12CommandQueue::Signal` in late 2026, with `int3` filler in front of it
@@ -121,6 +140,10 @@ TEST(PrologueFacts, a_five_byte_entry_has_no_interior_boundary) {
     EXPECT_EQ(facts.interior_boundaries, 0u)
         << "a window that is one instruction cannot have a boundary inside it";
     EXPECT_EQ(facts.interior_mask, 0u) << "no boundaries, so no bits";
+    EXPECT_EQ(facts.entry_padding, 0u)
+        << "the filler this fixture owns is nop, which is not room -- asserted "
+           "rather than ignored, because reading it is what the fixture is "
+           "shaped to make safe";
 }
 
 TEST(PrologueFacts, a_short_entry_puts_a_boundary_inside_the_window) {
@@ -132,6 +155,7 @@ TEST(PrologueFacts, a_short_entry_puts_a_boundary_inside_the_window) {
         << "the second instruction starts at offset 3, inside the window";
     EXPECT_EQ(facts.interior_mask, 1u << 3)
         << "and the mask has to say where, not just how many";
+    EXPECT_EQ(facts.entry_padding, 0u) << "nop filler, same as the fixture above";
 }
 
 TEST(PrologueFacts, the_runtime_shape_that_straddles_a_boundary_still_has_room_in_front) {
