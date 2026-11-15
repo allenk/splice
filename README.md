@@ -7,7 +7,7 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green)
 ![Platforms](https://img.shields.io/badge/platforms-Android%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-**Status:** **v1.2.0** · productized from the framework behind an Android game-enhancement system in production. Live-verified on Windows x86_64, Snapdragon 8 Gen 3 and Jetson Orin Nano ARM64, and shipping inside running games on Windows — Direct3D 11 and Direct3D 12 — in [GpuThermalGuard](https://github.com/allenk/GpuThermalGuard)'s in-game overlay.
+**Status:** **v1.3.0** · productized from the framework behind an Android game-enhancement system in production. Live-verified on Windows x86_64, Snapdragon 8 Gen 3 and Jetson Orin Nano ARM64, and shipping inside running games on Windows — Direct3D 11 and Direct3D 12 — in [GpuThermalGuard](https://github.com/allenk/GpuThermalGuard)'s in-game overlay.
 
 ---
 
@@ -718,7 +718,7 @@ src/                 Compiled library
   engine/            engine dispatcher + GOT/IAT patchers + live transaction
   arch/{arm64,x86_64}/  disasm + inline patcher + atomic install
   os/{posix,win32}/  memory + module enumeration + thread suspension
-tests/               GTest (326 cases)
+tests/               GTest (360 cases; fewer where a tier or an architecture is absent)
 benchmark/           Google Benchmark microbenches
 examples/            hello_hook, malloc_tracker, member_function, gpu_app, vulkan_app
 docs/                splice-guide.md (canonical) + comparisons + performance reports
@@ -753,6 +753,31 @@ registry that pays for it. Highlights:
 - Lock-free registry by default: 4.3 ns/call on x86_64, 4.6 on Snapdragon 8 Gen 3.
 - No `abort()` anywhere in the library; capacity and configuration mismatches
   are refusals.
+
+**v1.3.0 — shipped (2026-11-15):** naming a vtable site with no object to
+read it out of, and the failure paths under the coordinated install.
+Highlights:
+
+- `Live::at_slot(slot, Signature{})` — name the slot by its own address, for a
+  caller that holds the table and no instance. Pair it with `.expect(address)`:
+  that comparison is the whole of the admission, because nothing here can check
+  the caller's arithmetic for it.
+- `splice_vtable_swap_expect` — a slot store conditional on the value the
+  caller read, so another overlay arriving between the read and the write is a
+  refusal rather than a silent overwrite that also published the wrong original.
+- `splice_prologue_facts.entry_padding` — `int3` filler in front of the entry,
+  the one place near a function where bytes can be written without coordinating
+  with anybody. Reported, not yet installed into. **This grows a struct the
+  caller allocates — rebuild against the matching header.**
+- A group refuses two sites that name the same slot or the same target, at
+  admission. It used to admit them, and `disable()` then left a released stub
+  in the slot and reported success.
+- The frozen interval no longer logs, reaches stdio, or takes a lock a
+  suspended thread can hold; rollback flushes the instruction cache; every
+  flush result is read, and a trampoline whose flush failed is not published.
+- `splice_live_release` after a `lost` commit releases nothing, on purpose:
+  both halves of a release can wait on a resource a still-suspended thread
+  holds.
 
 **Next (optional):** chaining onto patches installed by others; the `live` tier
 beyond Windows x86_64; `ADR` materialisation on ARM64; Android ARM32 (FR-006);

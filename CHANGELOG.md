@@ -4,6 +4,133 @@ All notable changes to Splice are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-15
+
+Added API, so a minor bump: a second way to name a vtable site, a slot store
+conditional on what the caller read, and one more fact about a prologue. The
+rest is failure paths that were reachable and are not any more.
+
+### Added
+- `splice::Live::at_slot(slot, Signature{})`, and the three-argument form that
+  takes the callback with it -- name a vtable slot by the address of the slot
+  itself, for a caller that holds the table but no instance to read it out of:
+  one that resolved the slot in another process and translated it across module
+  bases, or that installs before any instance exists. Both tiers accept it.
+  `slot_swap` stores into the slot; `live` reads it to find the function and
+  inline-patches that, which is what it does for `Vtable` as well.
+  - **Pair it with `.expect(address)`.** Nothing in this library can tell
+    whether a slot address handed to it is right -- it is the caller's
+    arithmetic over the caller's evidence -- so the comparison against an
+    independently obtained function address is the whole of the admission. Two
+    measurements by different routes having to agree is not proof; a
+    disagreement is a refusal with nothing written.
+- `splice_vtable_swap_expect(slot, expected, new_func, out_found, out_record)`
+  on the C ABI -- the same store as `splice_vtable_swap`, performed only while
+  the slot still holds `expected`, and reporting what it actually held.
+  - A group install now uses it, and the reason is the gap between its phases.
+    It reads the slot in one phase to learn the original and publishes that
+    where the hook will look for it, then stores the new pointer in a later
+    one. Another overlay taking the slot in between used to be overwritten in
+    silence -- and the "original" this hook had published would be the value
+    from before they arrived, so calling it would skip their hook. Neither is
+    visible afterwards from the bytes. A mismatch is somebody else's hook, and
+    it refuses the whole group rather than retrying: retrying is the
+    unconditional form by another name.
+- `splice_prologue_facts.entry_padding` -- bytes of `int3` filler immediately
+  before the entry, counted backwards and capped at thirty-two. Only `int3`
+  counts, and that distinction is the point: a `nop` run can be fallen into, so
+  a thread can be standing in one, while an `int3` traps and no correct
+  execution path is ever inside it. That makes such a run the one place near a
+  function where bytes can be written without coordinating with anybody.
+  Counted within the entry's own page only. This library does not yet install
+  that way; it reports whether the room is there.
+  - **This grows a struct the caller allocates.** A caller compiled against the
+    1.2.0 header and linked against a 1.3.0 library hands over an object
+    shorter than the library writes. The header and the library are built and
+    pinned together, which is how this project consumes itself and what the
+    header now says; a prebuilt 1.3.0 library is not a drop-in replacement
+    under a 1.2.0 header. Rebuilding against the matching header is all that is
+    required, and nothing else in this release changes a declared layout.
+
+### Changed
+- A group refuses two sites that name the same slot, or the same target
+  address, at admission -- before any publication and before any write. It used
+  to admit them: installation walked `original -> first stub -> second stub`,
+  recording the original and the first stub as the two displaced values, and
+  `disable()` restores in the order it installed. So it put back the original
+  and then the first stub, leaving the slot holding a stub that had just been
+  returned to the pool and could already be bound to a different callback, and
+  the group reported success. Nothing about it needed a competing writer or a
+  thread at an awkward moment.
+  - Not covered, and said rather than left to be found: two *different* slots
+    that hold the same function, which the coordinated tier would inline-patch
+    twice. Those values do not exist until the slots have been read, so the
+    check would have to live in prepare, and whether one function reached by
+    two legitimate routes is a duplicate at all is a contract decision.
+- `splice_live_release` after a `lost` commit releases nothing, on purpose.
+  `lost` means at least one thread could not be resumed and is still
+  suspended, and both halves of an ordinary release can wait on a resource such
+  a thread holds -- changing page protection takes a lock in the kernel's
+  address-space bookkeeping, and freeing the group's memory takes the process
+  heap lock. So the one step the caller is required to perform would be the
+  step that hangs. The group's memory, its thread references and its writable
+  pages are retained for the lifetime of the process instead. Calling it is
+  still correct and still required; it simply has nothing to do, and the caller
+  is not left holding an obligation it cannot discharge.
+- The frozen interval -- the window with every enumerated thread suspended --
+  no longer logs, no longer reaches stdio, and no longer takes a lock that a
+  suspended thread can be holding. Rollback inside that window had been doing
+  all three, and a rollback is exactly when the window is longest.
+- `splice_prologue_profile`'s documentation says which install path enforces
+  the five-byte window and which lengthens. It had asserted, for every path,
+  that the fourteen-byte absolute form "does not arise" because a relay is
+  allocated beside every target -- and the second clause does not follow from
+  the first. The ordinary installer uses that relay only when the relay itself
+  lands within rel32; when neither it nor the replacement does, it plans
+  fourteen and writes them with `memcpy`. It still walks the prologue to the
+  length it planned, so what is lost there is the single aligned store, not the
+  boundary arithmetic. The strict and coordinated planners have no fourteen-byte
+  form at all: a site they cannot patch in five bytes is a site they decline.
+- The same documentation says which kind of target the backwards padding count
+  is in bounds for. It reads the bytes in front of the entry, which belong to
+  the image a function lives in and are outside a C++ object, so profiling a
+  byte array reads one byte before it and a sanitizer reports that, correctly.
+
+### Fixed
+- `.replace_with()` on a site named by its slot. `adopt_site` took a target and
+  no slot, so a slot-named site passed a null target into its own admission
+  check and the group refused in *prepare* -- through `splice::Vtable`'s
+  pointer-to-member route as well as through `at_slot`.
+- A trampoline whose instruction cache could not be flushed is no longer
+  published. Both flushes are checked and a failure takes the clean refusal the
+  rest of the function takes: the block is returned and no member is published,
+  so there is no object to hand an original out of. The flush result had been
+  discarded at eight of nine call sites.
+- A clean refusal no longer frees trampolines whose addresses the caller had
+  already been told were published.
+- Rollback flushes the instruction cache. It had restored bytes and left them
+  unflushed, which is the one thing the install path is careful about.
+- A commit's outcome is delivered before it is logged, not after.
+- The engine stub -- the build with no architecture backend -- defines every
+  entry point the public header declares, so a stub build links. A test now
+  requires each declared name to be *defined* there rather than merely
+  mentioned.
+
+### Known limitations in this release
+- **Coexisting with a patch somebody else installed is a refusal, not a chain.**
+  A second install on a function this library already patched is rejected with
+  a clear message rather than stacked, because the second trampoline would
+  relocate the installed jump and point it back at the first hook's relay.
+  `.expect_prologue(bytes)` is the check that notices a *foreign* patch, and
+  the coordinated tier is where it matters, since a vtable slot can be pristine
+  while the code behind it is not. Chaining -- read the existing jump, follow it
+  to the true original, install above it -- is the feature this stands in for,
+  and it is not implemented.
+- **A thread that appears after the enumeration is neither covered nor
+  detected** by the coordinated tier, and that gap has no detector.
+  `splice::live` means the threads this library could enumerate were
+  coordinated, which is why the tier is named `live` and not `safe`.
+
 ## [1.2.0] - 2026-10-13
 
 ### Added
@@ -809,7 +936,8 @@ Known test-design issue (NOT a Splice library bug — filed as task):
 - Callback type is a template parameter, not `std::function`, so the
   fluent chain fully inlines (FR-010)
 
-[Unreleased]: https://github.com/allenk/splice/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/allenk/splice/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/allenk/splice/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/allenk/splice/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/allenk/splice/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/allenk/splice/releases/tag/v1.0.0
