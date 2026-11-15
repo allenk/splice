@@ -220,10 +220,29 @@ typedef struct {
 // install path does, so the facts describe the function and not the thunk in
 // front of it.
 //
-// The patch length measured against is five bytes, which is what would
-// actually be written: a relay is allocated beside every target, so the
-// jump's destination is always within rel32 and the fourteen-byte absolute
-// form does not arise.
+// The patch length measured against is five bytes. Whether that is also the
+// length written depends on the install path, and the difference is the
+// caller's to know:
+//
+//   - The strict and coordinated paths enforce it. Their planner refuses a
+//     site whose jump destination it cannot reach with a five-byte relative
+//     jump; it has no longer form to fall back to, so a site it cannot patch
+//     in five bytes is a site it declines.
+//   - The ordinary path lengthens instead. A relay is allocated beside every
+//     target so the destination is usually in reach, but that relay is used
+//     only when it lands in reach itself; when neither it nor the replacement
+//     does, fourteen bytes are written with memcpy. The displaced
+//     instructions are still accounted for -- that installer walks the
+//     prologue to the length it planned -- so what is lost is the single
+//     aligned store, not the boundary arithmetic.
+//
+// So a caller that admits an install on these facts and then takes the
+// ordinary path has admitted a five-byte window and may get a fourteen-byte
+// write into a live function. Admit on the coordinated tier, or treat the
+// five as a plan rather than a promise.
+//
+// This comment asserted until now that the fourteen-byte form does not
+// arise. It does, on one of the two paths, and nothing here had said which.
 //
 // Every field of `*out` is written on success, so `out` must be a struct of
 // the size this header declares. The struct gained a field after version

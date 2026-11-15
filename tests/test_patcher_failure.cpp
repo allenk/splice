@@ -236,3 +236,71 @@ TEST(PatcherFailure, strict_range_and_permission_matrix) {
         }
     }
 }
+
+namespace {
+// Only its address is used; this binary never executes a patched byte.
+void FarReplacement() {}
+
+std::uintptr_t gap(const void* a, const void* b) {
+    const auto x = reinterpret_cast<std::uintptr_t>(a);
+    const auto y = reinterpret_cast<std::uintptr_t>(b);
+    return x > y ? x - y : y - x;
+}
+}
+
+// Two install paths, one set of conditions, two different answers -- which is
+// the fact a consumer needs and the one place it was never written down.
+//
+// The length these facts are measured against is five bytes. That holds as a
+// guarantee only where something enforces it, and only one of the two paths
+// does. A relay is allocated beside every target so the destination is
+// usually in reach, but the ordinary installer uses that relay only when the
+// relay itself lands in reach; when neither it nor the replacement does, it
+// plans fourteen bytes and writes them with `memcpy`. The planner the
+// coordinated tier uses has no such branch, so the same conditions leave it
+// nothing to do but hand the block back.
+//
+// Until this test existed, both halves were true only in the source: the
+// public header asserted the fourteen-byte form could not arise at all.
+TEST(PatcherFailure, beyond_rel32_the_ordinary_patch_lengthens_and_the_strict_plan_refuses) {
+    alignas(16) std::array<std::uint8_t, 64> far_target{};
+    void* const replacement = reinterpret_cast<void*>(&FarReplacement);
+    if (gap(far_target.data(), trampoline_storage.data()) <= 0x80000000ull ||
+        gap(far_target.data(), replacement) <= 0x80000000ull) {
+        GTEST_SKIP() << "This OS/toolchain placed the stack fixture within rel32 of the image";
+    }
+    far_target.fill(0x90);
+    const auto untouched = far_target;
+
+    // The ordinary path. Its boundary arithmetic is right -- it walks the
+    // prologue to the length it planned -- so what is lost is the single
+    // aligned store, not an unaccounted instruction boundary.
+    allocations = frees = writable_requests = restore_requests = 0;
+    allow_write = true;
+    void* original = nullptr;
+    EXPECT_EQ(splice::arch::x86_64::install_inline_patch(far_target.data(), replacement,
+                                                         &original),
+              far_target.data());
+    EXPECT_EQ(original, trampoline_storage.data());
+    EXPECT_EQ(far_target[0], 0xffu);   // ff 25: jmp qword ptr [rip+0]
+    EXPECT_EQ(far_target[1], 0x25u);
+    EXPECT_EQ(writable_requests, 1u);
+    EXPECT_EQ(writable_size, 16u);
+    EXPECT_EQ(restore_requests, 1u);
+    EXPECT_EQ(restored_size, 14u);     // the fourteen bytes it planned and walked
+    EXPECT_EQ(frees, 0u);
+    EXPECT_TRUE(std::equal(untouched.begin() + 14, untouched.end(), far_target.begin() + 14));
+
+    // The planner every coordinated site is prepared with, under the same
+    // conditions. It refuses before any permission is asked for, and the
+    // block it was given goes back.
+    far_target = untouched;
+    allocations = frees = writable_requests = restore_requests = 0;
+    splice::arch::x86_64::PreparedStrictPatch plan;
+    EXPECT_FALSE(plan.prepare(far_target.data(), replacement, untouched.data(), 16));
+    EXPECT_EQ(allocations, 1u);
+    EXPECT_EQ(frees, 1u);
+    EXPECT_EQ(writable_requests, 0u);
+    EXPECT_EQ(restore_requests, 0u);
+    EXPECT_EQ(far_target, untouched);
+}
