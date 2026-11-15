@@ -336,3 +336,80 @@ TEST_F(SlotReplaceWith, a_method_named_by_pointer_to_member_takes_one_too) {
     EXPECT_EQ(calc->scale(5), 115);
     EXPECT_EQ(g_scale_calls.load(), 1);
 }
+
+// ─── One site named twice ──────────────────────────────────────────────────
+//
+// The group used to admit it. Installation writes `original -> first stub ->
+// second stub` and records the original and the first stub as the two displaced
+// values; `disable()` restores in the order it installed, so it puts back the
+// original and then the first stub, and the slot ends up holding a stub that has
+// just been returned to the pool and may already be bound to a different
+// callback. The group reported success.
+//
+// `at_slot` makes the shape easy to write, which is why these cases live here.
+// It is not what created it: naming the same method twice through `Vtable`
+// arrives at the same loops. Nothing about it needs a competing writer or a
+// thread at an awkward moment -- it is two lines of a fluent chain.
+namespace {
+
+int duplicate_target(int value) { return value * 2; }
+int other_target(int value) { return value * 3; }
+using DupFn = int (*)(int);
+
+} // namespace
+
+TEST_F(SlotByAddress, one_slot_named_twice_is_refused_before_anything_is_written) {
+    const int index = slot_of_scale();
+    ASSERT_GE(index, 0);
+    void** const slot = splice::test::table_slot(index);
+    ASSERT_NE(slot, nullptr);
+    void* const original = splice::test::table_entry(index);
+
+    m_outcome = splice::Live<>{}
+        .at_slot(slot, ScaleFn{}, [](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value) + 1;
+        })
+        .at_slot(slot, ScaleFn{}, [](auto orig, ICalculator* self, int value) {
+            g_scale_calls.fetch_add(1);
+            return orig(self, value) + 2;
+        })
+        .install(splice::slot_swap);
+
+    EXPECT_EQ(m_outcome.state(), splice::State::refused)
+        << "refused, not installed and then undone -- undoing it is the defect";
+    EXPECT_EQ(m_outcome.failure().stage, splice::Stage::prepare)
+        << "and refused before anything was written";
+    EXPECT_FALSE(m_outcome.active());
+
+    // The cell is untouched and the method still does what the provider wrote.
+    EXPECT_EQ(splice::test::table_entry(index), original);
+    EXPECT_EQ(splice::test::calculator()->scale(5), 15);
+    EXPECT_EQ(g_scale_calls.load(), 0) << "neither callback was ever reachable";
+}
+
+// The same check on the shape the shipping consumer actually writes: every site
+// named by address. The refusal lives in the admission both tiers share, which
+// runs before the coordinated tier allocates, suspends, or asks whether it is
+// available on this build at all -- so this case needs no live tier and no skip,
+// and it names `splice::live` in order to assert exactly that.
+// It also names the clash as the first and the third site rather than two
+// adjacent ones, which is the difference between comparing every pair and
+// comparing neighbours. Both of those detect the case above; only one of them
+// detects this, and without it the pairwise comparison would be an untested
+// claim in a comment.
+TEST_F(SlotByAddress, one_target_named_twice_is_refused_too) {
+    void* const target = reinterpret_cast<void*>(&duplicate_target);
+    void* const other  = reinterpret_cast<void*>(&other_target);
+
+    splice::Outcome outcome = splice::Live<>{}
+        .at(target, DupFn{}, [](auto orig, int value) { return orig(value); })
+        .at(other,  DupFn{}, [](auto orig, int value) { return orig(value); })
+        .at(target, DupFn{}, [](auto orig, int value) { return orig(value) + 1; })
+        .install(splice::live);
+
+    EXPECT_EQ(outcome.state(), splice::State::refused);
+    EXPECT_EQ(outcome.failure().stage, splice::Stage::prepare)
+        << "the shared admission, not the tier's own work";
+    EXPECT_FALSE(outcome.active());
+}

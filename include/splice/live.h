@@ -1112,6 +1112,60 @@ private:
             fail(Stage::prepare, Operation::none, 0);
             return false;
         }
+        // The same site named twice, which this group used to admit.
+        //
+        // Both tiers walk the sites in order and record what each one
+        // displaced, and both undo in that same order. So two sites on one
+        // slot install `original -> first stub -> second stub` holding the
+        // original and the first stub as the two displaced values, and undoing
+        // puts back the original and then the first stub -- leaving the slot
+        // holding a stub that has just been returned to the pool, and may
+        // already be bound to a different callback by the time a call arrives.
+        // The group reported success. Nothing about it needs a competing
+        // writer or a thread at the wrong moment.
+        //
+        // Refusing here is the whole of the fix, and here is the only place it
+        // can be the whole of it: before any publication and before any write,
+        // where there is nothing to put back. Reversing the undo order is not
+        // the answer -- deliberate chaining inside one group would need its own
+        // contract and its own proof, and this refuses rather than inventing
+        // one.
+        //
+        // Compared pairwise, because the clash is between any two sites and
+        // not between neighbours. A slot and a target are both compared, each
+        // only when both sides have one: a site named by address has no slot,
+        // a slot-named site's target is resolved later in prepare, and a null
+        // on either side is not a match.
+        //
+        // What this does not cover, stated rather than left to be discovered:
+        // two *different* slots that hold the same function, which the
+        // coordinated tier would inline-patch twice. Those values do not exist
+        // until `read_slot` has run, so the check would have to live in
+        // prepare; and whether one function reached by two legitimate routes
+        // is a duplicate at all is a contract decision, not an oversight here.
+        for (std::size_t i = 0; i < m_sites.size(); ++i) {
+            for (std::size_t j = i + 1; j < m_sites.size(); ++j) {
+                const auto& first  = m_sites[i];
+                const auto& second = m_sites[j];
+                const bool same_slot =
+                    first.slot != nullptr && first.slot == second.slot;
+                const bool same_target =
+                    first.target != nullptr && first.target == second.target;
+                if (!same_slot && !same_target) continue;
+                SPLICE_LOGE("splice: sites %zu and %zu name the same %s (%p). A "
+                            "group restores in the order it installed, so "
+                            "undoing both would put the first site's stub back "
+                            "into the slot after releasing it. The group is "
+                            "refused: name the site once, or install the second "
+                            "hook as a group of its own.",
+                            first.site.ordinal, second.site.ordinal,
+                            same_slot ? "slot" : "target",
+                            same_slot ? static_cast<void*>(first.slot)
+                                      : first.target);
+                fail(Stage::prepare, Operation::resolve_slot, 0, second.site);
+                return false;
+            }
+        }
         group_bit = m_group_scope ? m_group_scope->bit() : m_group_bit;
         if (m_group_reentry_requested && group_bit == 0) {
             SPLICE_LOGE("splice: non_reentrant() for the group could not reserve "
